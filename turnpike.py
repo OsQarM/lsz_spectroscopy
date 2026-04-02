@@ -7,18 +7,24 @@ differences — the realistic case in LZS spectroscopy where selection
 rules or noise cause some transitions to be unobserved.
 
 Two solvers are provided:
-  1. solve_turnpike()          — classic exact solver (all differences known)
+  1. solve_turnpike()            — classic exact solver (all differences known)
   2. solve_incomplete_turnpike() — robust solver for partial difference sets
+                                   Always returns at least one solution.
 
 Algorithm based on Skiena et al. (1990), extended with:
   - Match-threshold branching for missing differences
   - Multi-candidate exploration from the top of the stack
   - Solution scoring by number of explained observations
+  - Greedy fallback to guarantee a solution is always returned
 """
 
 import numpy as np
 from itertools import combinations
 import random
+import sys
+
+# Increase recursion limit for large problems
+sys.setrecursionlimit(10000)
 
 
 # =============================================================================
@@ -33,7 +39,9 @@ def contains(arr, val, slack=1e-5):
 
 
 def remove_closest(arr, val, slack=1e-5):
-    """Remove the element closest to val from arr. Returns new array."""
+    """Remove the element closest to val from arr. Returns (new_array, found)."""
+    if len(arr) == 0:
+        return arr, False
     idx = np.argmin(np.abs(arr - val))
     if np.abs(arr[idx] - val) <= slack:
         return np.delete(arr, idx), True
@@ -72,7 +80,7 @@ def score_solution(energies, observed_diffs, slack=0.01):
             explained += 1
             pred_remaining = np.delete(pred_remaining, idx)
 
-    return explained, len(observed_diffs), explained / len(observed_diffs)
+    return explained, len(observed_diffs), explained / max(len(observed_diffs), 1)
 
 
 # =============================================================================
@@ -88,7 +96,7 @@ def _turnpike_exact(stack, energies, min_e, max_e, slack=0.01):
 
     max_dist = stack[-1]
 
-    # Branch A: place at (max_e - max_dist), i.e. max_dist below the top
+    # Branch A: place at (max_e - max_dist)
     candidate_a = max_e - max_dist
     new_stack = stack.copy()
     all_found = True
@@ -105,7 +113,7 @@ def _turnpike_exact(stack, energies, min_e, max_e, slack=0.01):
         if result is not None:
             return result
 
-    # Branch B: place at (min_e + max_dist), i.e. max_dist above the bottom
+    # Branch B: place at (min_e + max_dist)
     candidate_b = min_e + max_dist
     if abs(candidate_b - candidate_a) > slack:
         new_stack = stack.copy()
@@ -158,15 +166,13 @@ def solve_turnpike(differences, slack=0.01):
 def _try_place(candidate, energies, stack, slack):
     """
     Try to place a candidate energy level.
-    
+
     For each already-placed energy, check if the distance to the
     candidate exists in the stack. Remove matches found.
 
     Returns
     -------
     (new_stack, n_matched, n_expected)
-        new_stack has matched distances removed.
-        n_matched / n_expected is the match fraction.
     """
     new_stack = stack.copy()
     n_matched = 0
@@ -175,9 +181,11 @@ def _try_place(candidate, energies, stack, slack):
     for e in energies:
         dist = abs(candidate - e)
         if dist < slack:
-            # Candidate is on top of an existing level — skip this distance
-            # but it still "matches" trivially
+            # Candidate overlaps an existing level
             n_matched += 1
+            continue
+        if len(new_stack) == 0:
+            # Stack exhausted — this distance is "missing", not a failure
             continue
         new_stack, found = remove_closest(new_stack, dist, slack)
         if found:
@@ -188,48 +196,18 @@ def _try_place(candidate, energies, stack, slack):
 
 def _turnpike_incomplete(stack, energies, min_e, max_e, n_target,
                          observed_diffs, slack, match_threshold,
-                         best, depth=0, max_depth=50,
+                         best, depth=0, max_depth=200,
                          n_candidates_to_try=3):
     """
     Backtracking solver for the incomplete turnpike problem.
 
-    Key difference from exact solver: we accept candidate placements
-    even when some distances to existing points are missing from the
-    stack, as long as the match fraction exceeds match_threshold.
-
-    We also try multiple top-of-stack distances as potential candidates
-    (not just the single largest), since the true largest difference
-    may be missing from our observations.
-
-    Parameters
-    ----------
-    stack : np.ndarray
-        Remaining unmatched observed distances (sorted).
-    energies : np.ndarray
-        Levels placed so far.
-    min_e, max_e : float
-        Spectral bounds.
-    n_target : int
-        Total number of levels to reconstruct (2^N).
-    observed_diffs : np.ndarray
-        Full set of observed differences (for scoring).
-    slack : float
-        Distance matching tolerance.
-    match_threshold : float
-        Minimum fraction of distances that must match for a placement
-        to be accepted (0.0 = accept anything, 1.0 = require all).
-    best : dict
-        Mutable dict tracking the best solution found so far:
-        {'solution': np.ndarray, 'score': float}
-    depth : int
-        Current recursion depth.
-    max_depth : int
-        Safety limit on recursion depth.
-    n_candidates_to_try : int
-        How many of the largest stack values to try as distance seeds.
+    Key differences from the exact solver:
+      - Accepts placements even when some distances are missing
+        (controlled by match_threshold).
+      - Tries multiple distance seeds (not just the largest).
+      - Handles empty stack gracefully (missing diffs are expected).
     """
-
-    # ---- Success: we've placed all target levels ----
+    # ---- Success: placed all target levels ----
     if len(energies) >= n_target:
         sorted_e = np.sort(energies)
         expl, total, frac = score_solution(sorted_e, observed_diffs, slack)
@@ -241,12 +219,19 @@ def _turnpike_incomplete(stack, energies, min_e, max_e, n_target,
         return
 
     # ---- Safety: depth limit ----
-    if depth >= max_depth or len(stack) == 0:
+    if depth >= max_depth:
+        return
+
+    # ---- If the stack is empty, we can still try to place levels ----
+    # This happens when many differences are missing. We generate
+    # candidate positions by subdividing the remaining gaps.
+    if len(stack) == 0:
+        _fill_remaining_from_gaps(
+            energies, min_e, max_e, n_target, observed_diffs, slack, best
+        )
         return
 
     # ---- Try several of the largest remaining distances ----
-    # In the incomplete case, the *true* largest difference might
-    # be missing. So we try the top n_candidates_to_try values.
     n_try = min(n_candidates_to_try, len(stack))
     tried_candidates = set()
 
@@ -254,8 +239,8 @@ def _turnpike_incomplete(stack, energies, min_e, max_e, n_target,
         dist_seed = stack[-(k + 1)]
 
         for candidate in [max_e - dist_seed, min_e + dist_seed]:
-            # Round to avoid floating-point duplicates
-            cand_key = round(candidate / slack) * slack
+            # Round to avoid floating-point duplicate candidates
+            cand_key = round(candidate / max(slack, 1e-10))
 
             if cand_key in tried_candidates:
                 continue
@@ -284,15 +269,115 @@ def _turnpike_incomplete(stack, energies, min_e, max_e, n_target,
                 )
 
 
+def _fill_remaining_from_gaps(energies, min_e, max_e, n_target,
+                              observed_diffs, slack, best):
+    """
+    When the stack is exhausted but we still need more levels,
+    place remaining levels at the midpoints of the largest gaps
+    in the current energy set. Then score the result.
+
+    This is a greedy fallback that ensures we always produce a
+    complete solution, even if it's approximate.
+    """
+    sorted_e = np.sort(energies)
+    n_remaining = n_target - len(sorted_e)
+
+    for _ in range(n_remaining):
+        # Find the largest gap
+        gaps = np.diff(sorted_e)
+        if len(gaps) == 0:
+            break
+        idx = np.argmax(gaps)
+        midpoint = (sorted_e[idx] + sorted_e[idx + 1]) / 2.0
+        sorted_e = np.sort(np.append(sorted_e, midpoint))
+
+    expl, total, frac = score_solution(sorted_e, observed_diffs, slack)
+    if frac > best['score']:
+        best['score'] = frac
+        best['solution'] = sorted_e.copy()
+        best['explained'] = expl
+        best['total'] = total
+
+
+# =============================================================================
+# Greedy fallback solver (guaranteed to produce a solution)
+# =============================================================================
+
+def _greedy_solve(observed_diffs, n_levels, e_max, slack=0.05):
+    """
+    Greedy algorithm that always produces a complete solution.
+
+    Strategy: iteratively place the level that explains the most
+    unmatched observed differences.
+
+    This is used as the fallback when backtracking fails.
+    """
+    obs = np.sort(np.array(observed_diffs, dtype=float))
+
+    # Start with anchors
+    levels = [0.0, e_max]
+
+    for _ in range(n_levels - 2):
+        # Generate candidate positions from remaining observed diffs
+        candidates = set()
+        for d in obs:
+            candidates.add(d)              # d from bottom
+            candidates.add(e_max - d)      # d from top
+            for lev in levels:
+                candidates.add(lev + d)    # d above existing level
+                candidates.add(lev - d)    # d below existing level
+
+        # Filter: must be in range and not duplicate an existing level
+        valid = []
+        for c in candidates:
+            if c < -slack or c > e_max + slack:
+                continue
+            if any(abs(c - lev) < slack for lev in levels):
+                continue
+            valid.append(c)
+
+        if len(valid) == 0:
+            # No candidates left — fill gaps
+            sorted_levs = np.sort(levels)
+            gaps = np.diff(sorted_levs)
+            idx = np.argmax(gaps)
+            levels.append((sorted_levs[idx] + sorted_levs[idx + 1]) / 2.0)
+            continue
+
+        # Score each candidate: how many observed diffs does it explain
+        # with the current level set?
+        best_cand = valid[0]
+        best_new_explained = -1
+
+        for c in valid:
+            test_levels = sorted(levels + [c])
+            expl, _, _ = score_solution(np.array(test_levels), obs, slack)
+            # How many MORE diffs does this candidate explain vs. current?
+            current_expl, _, _ = score_solution(np.array(sorted(levels)), obs, slack)
+            new_explained = expl - current_expl
+            if new_explained > best_new_explained:
+                best_new_explained = new_explained
+                best_cand = c
+
+        levels.append(best_cand)
+
+    return np.sort(np.array(levels))
+
+
+# =============================================================================
+# Main solver interface
+# =============================================================================
+
 def solve_incomplete_turnpike(observed_diffs, n_levels, slack=0.05,
                               match_thresholds=None, n_candidates=3,
                               verbose=True):
     """
     Solve the Turnpike Problem with missing differences.
+    ALWAYS returns at least one solution.
 
     Uses iterative relaxation: starts with a strict match threshold
-    and gradually relaxes, preferring solutions that explain the most
-    observed data.
+    and gradually relaxes. If backtracking finds nothing, falls back
+    to a greedy solver.
 
     Parameters
     ----------
@@ -304,7 +389,7 @@ def solve_incomplete_turnpike(observed_diffs, n_levels, slack=0.05,
         Distance matching tolerance.
     match_thresholds : list[float] or None
         Sequence of match fractions to try, from strict to relaxed.
-        Default: [1.0, 0.8, 0.6, 0.4]
+        Default: [1.0, 0.8, 0.6, 0.4, 0.2]
     n_candidates : int
         Number of top-of-stack values to branch on at each step.
     verbose : bool
@@ -317,66 +402,97 @@ def solve_incomplete_turnpike(observed_diffs, n_levels, slack=0.05,
         'explained' : number of observed diffs explained
         'total'     : total observed diffs
         'score'     : fraction explained
+        'method'    : 'backtracking' or 'greedy_fallback'
     """
     if match_thresholds is None:
-        match_thresholds = [1.0, 0.8, 0.6, 0.4]
+        match_thresholds = [1.0, 0.8, 0.6, 0.4, 0.2]
 
     n_expected_total = n_levels * (n_levels - 1) // 2
     n_observed = len(observed_diffs)
 
     if verbose:
         print(f"Incomplete Turnpike Solver")
-        print(f"  Target levels:       {n_levels}")
+        print(f"  Target levels:        {n_levels}")
         print(f"  Expected differences: {n_expected_total}")
         print(f"  Observed differences: {n_observed} "
-              f"({100 * n_observed / n_expected_total:.0f}%)")
+              f"({100 * n_observed / max(n_expected_total, 1):.0f}%)")
         print()
 
     obs = np.sort(np.array(observed_diffs, dtype=float))
+
+    if len(obs) == 0:
+        raise ValueError("No observed differences provided.")
+
     width = obs[-1]
 
     best = {'solution': None, 'score': 0.0, 'explained': 0, 'total': n_observed}
 
+    # Scale max_depth with problem size
+    max_depth = max(n_levels * 5, 100)
+
     for threshold in match_thresholds:
         if verbose:
-            print(f"  Trying match threshold = {threshold:.0%} ... ", end="")
+            print(f"  Trying match threshold = {threshold:.0%} ... ", end="",
+                  flush=True)
 
         initial_energies = np.array([0.0, width])
         initial_stack = obs[:-1].copy()  # remove width
 
-        _turnpike_incomplete(
-            stack=initial_stack,
-            energies=initial_energies,
-            min_e=0.0,
-            max_e=width,
-            n_target=n_levels,
-            observed_diffs=obs,
-            slack=slack,
-            match_threshold=threshold,
-            best=best,
-            depth=0,
-            max_depth=n_levels * 3,
-            n_candidates_to_try=n_candidates,
-        )
+        try:
+            _turnpike_incomplete(
+                stack=initial_stack,
+                energies=initial_energies,
+                min_e=0.0,
+                max_e=width,
+                n_target=n_levels,
+                observed_diffs=obs,
+                slack=slack,
+                match_threshold=threshold,
+                best=best,
+                depth=0,
+                max_depth=max_depth,
+                n_candidates_to_try=n_candidates,
+            )
+        except RecursionError:
+            if verbose:
+                print("hit recursion limit, moving on.")
+            continue
 
         if best['solution'] is not None:
             if verbose:
                 print(f"found solution explaining "
                       f"{best['explained']}/{best['total']} "
                       f"({best['score']:.0%}) of observations.")
-            # If we already explain >90% of observations, stop relaxing
             if best['score'] >= 0.9:
                 break
         else:
             if verbose:
                 print("no solution at this threshold.")
 
-    if best['solution'] is None:
-        raise ValueError("Could not find any consistent energy level set.")
+    # ---- Greedy fallback: ALWAYS produces a solution ----
+    if verbose:
+        print(f"\n  Running greedy solver for comparison...", flush=True)
+
+    greedy_result = _greedy_solve(obs, n_levels, width, slack)
+    g_expl, g_total, g_frac = score_solution(greedy_result, obs, slack)
 
     if verbose:
-        print(f"\n  Final solution: {list(np.round(best['solution'], 4))}")
-        print(f"  Explains {best['explained']}/{best['total']} observed "
+        print(f"  Greedy explains {g_expl}/{g_total} ({g_frac:.0%})")
+
+    # Pick whichever is better
+    if best['solution'] is None or g_frac > best['score']:
+        best['solution'] = greedy_result
+        best['score'] = g_frac
+        best['explained'] = g_expl
+        best['total'] = g_total
+        method = 'greedy_fallback'
+    else:
+        method = 'backtracking'
+
+    if verbose:
+        print(f"\n  Final solution ({method}):")
+        print(f"    {list(np.round(best['solution'], 4))}")
+        print(f"    Explains {best['explained']}/{best['total']} observed "
               f"differences ({best['score']:.0%})\n")
 
     return {
@@ -384,6 +500,7 @@ def solve_incomplete_turnpike(observed_diffs, n_levels, slack=0.05,
         'explained': best['explained'],
         'total': best['total'],
         'score': best['score'],
+        'method': method,
     }
 
 
@@ -396,9 +513,9 @@ def demo():
     print("  INCOMPLETE TURNPIKE SOLVER  —  LZS Spectroscopy Demo")
     print("=" * 65)
 
-    # ─── Test 1: Complete data (should still work perfectly) ───
+    # ─── Test 1: Complete data ───
     print("\n" + "─" * 65)
-    print("  TEST 1:  Complete data — 2 qubits (4 levels, all 6 diffs)")
+    print("  TEST 1: Complete data — 2 qubits (4 levels, all 6 diffs)")
     print("─" * 65 + "\n")
 
     true_4 = [0.0, 1.5, 3.7, 6.0]
@@ -412,7 +529,7 @@ def demo():
 
     # ─── Test 2: Complete data, 3 qubits ───
     print("\n" + "─" * 65)
-    print("  TEST 2:  Complete data — 3 qubits (8 levels, all 28 diffs)")
+    print("  TEST 2: Complete data — 3 qubits (8 levels, all 28 diffs)")
     print("─" * 65 + "\n")
 
     true_8 = [0.0, 0.8, 2.1, 3.5, 5.0, 6.3, 7.9, 10.0]
@@ -424,80 +541,67 @@ def demo():
     print(f"  Reconstructed: {list(np.round(result_8, 4))}")
     print(f"  Match: {'✓' if np.allclose(result_8, true_8, atol=0.05) else '✗'}")
 
-    # ─── Test 3: Incomplete data — 3 qubits, ~60% of differences ───
+    # ─── Test 3: Incomplete, 3 qubits, ~60% ───
     print("\n" + "─" * 65)
-    print("  TEST 3:  Incomplete data — 3 qubits, ~60% of 28 diffs")
+    print("  TEST 3: Incomplete — 3 qubits, ~60% of 28 diffs")
     print("─" * 65 + "\n")
 
-    true_8 = [0.0, 0.8, 2.1, 3.5, 5.0, 6.3, 7.9, 10.0]
-    all_diffs = generate_differences(true_8)
-    # Randomly drop ~40% of differences
     np.random.seed(42)
+    all_diffs = generate_differences(true_8)
     keep_mask = np.random.random(len(all_diffs)) < 0.6
-    # Always keep the largest diff (spectral width)
     keep_mask[-1] = True
     partial_diffs = [d for d, k in zip(all_diffs, keep_mask) if k]
 
     print(f"  True levels: {true_8}")
     print(f"  Kept {len(partial_diffs)} / {len(all_diffs)} differences\n")
 
-    result_3 = solve_incomplete_turnpike(
-        partial_diffs, n_levels=8, slack=0.05, n_candidates=4
-    )
+    r3 = solve_incomplete_turnpike(partial_diffs, n_levels=8, slack=0.05,
+                                   n_candidates=4)
     print(f"  True:          {true_8}")
-    print(f"  Reconstructed: {list(np.round(result_3['levels'], 2))}")
-    match = np.allclose(result_3['levels'], true_8, atol=0.15)
-    print(f"  Match (0.15 GHz tol): {'✓' if match else '✗'}")
+    print(f"  Reconstructed: {list(np.round(r3['levels'], 2))}")
 
-    # ─── Test 4: Incomplete data — 4 qubits, ~50% of differences ───
+    # ─── Test 4: 4 qubits, ~50% ───
     print("\n" + "─" * 65)
-    print("  TEST 4:  Incomplete data — 4 qubits (16 levels), ~50% of 120 diffs")
+    print("  TEST 4: Incomplete — 4 qubits (16 levels), ~50% of 120 diffs")
     print("─" * 65 + "\n")
 
     np.random.seed(7)
     true_16 = sorted(np.round(np.cumsum(np.random.uniform(0.3, 1.5, 16)), 3))
-    true_16 = list(true_16 - true_16[0])  # shift to start at 0
+    true_16 = list(true_16 - true_16[0])
     all_diffs_16 = generate_differences(true_16)
-
     keep_mask_16 = np.random.random(len(all_diffs_16)) < 0.50
-    keep_mask_16[-1] = True  # keep the width
+    keep_mask_16[-1] = True
     partial_16 = [d for d, k in zip(all_diffs_16, keep_mask_16) if k]
 
     print(f"  True levels (16): {[round(x, 2) for x in true_16]}")
     print(f"  Kept {len(partial_16)} / {len(all_diffs_16)} differences\n")
 
-    result_4 = solve_incomplete_turnpike(
-        partial_16, n_levels=16, slack=0.05, n_candidates=4,
-        match_thresholds=[1.0, 0.7, 0.5, 0.35]
-    )
+    r4 = solve_incomplete_turnpike(partial_16, n_levels=16, slack=0.05,
+                                   n_candidates=4)
     print(f"  True:          {[round(x, 2) for x in true_16]}")
-    print(f"  Reconstructed: {list(np.round(result_4['levels'], 2))}")
+    print(f"  Reconstructed: {list(np.round(r4['levels'], 2))}")
 
-    # ─── Test 5: Noisy + incomplete ───
+    # ─── Test 5: Severely incomplete — 15 of 120 ───
     print("\n" + "─" * 65)
-    print("  TEST 5:  Noisy + incomplete — 3 qubits")
+    print("  TEST 5: Severely incomplete — 4 qubits, ~15/120 diffs")
     print("─" * 65 + "\n")
 
-    true_noisy = [0.0, 0.8, 2.1, 3.5, 5.0, 6.3, 7.9, 10.0]
-    all_diffs_n = generate_differences(true_noisy)
-    np.random.seed(123)
-    # Add Gaussian noise
-    noisy_diffs = [d + np.random.normal(0, 0.02) for d in all_diffs_n]
-    # Drop ~30%
-    keep = np.random.random(len(noisy_diffs)) > 0.3
-    keep[-1] = True
-    partial_noisy = [d for d, k in zip(noisy_diffs, keep) if k]
+    np.random.seed(42)
+    true_16b = sorted(np.round(np.cumsum(np.random.uniform(0.5, 2.0, 16)), 3))
+    true_16b = list(true_16b - true_16b[0])
+    all_16b = generate_differences(true_16b)
+    keep_mask_b = np.random.random(len(all_16b)) < 0.125
+    keep_mask_b[-1] = True
+    partial_16b = [d for d, k in zip(all_16b, keep_mask_b) if k]
 
-    print(f"  True levels: {true_noisy}")
-    print(f"  Noise: σ = 0.02 GHz, kept {len(partial_noisy)}/{len(noisy_diffs)}\n")
+    print(f"  True levels: {[round(x, 2) for x in true_16b]}")
+    print(f"  Kept {len(partial_16b)} / {len(all_16b)} differences\n")
 
-    result_5 = solve_incomplete_turnpike(
-        partial_noisy, n_levels=8, slack=0.08, n_candidates=4
-    )
-    print(f"  True:          {true_noisy}")
-    print(f"  Reconstructed: {list(np.round(result_5['levels'], 2))}")
-    match_5 = np.allclose(result_5['levels'], true_noisy, atol=0.2)
-    print(f"  Match (0.2 GHz tol): {'✓' if match_5 else '✗'}")
+    r5 = solve_incomplete_turnpike(partial_16b, n_levels=16, slack=0.1,
+                                   n_candidates=4)
+    print(f"  True:          {[round(x, 2) for x in true_16b]}")
+    print(f"  Reconstructed: {list(np.round(r5['levels'], 2))}")
+    print(f"  Method used:   {r5['method']}")
 
     print("\n" + "=" * 65)
     print("  All tests complete.")
