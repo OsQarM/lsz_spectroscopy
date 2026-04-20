@@ -135,25 +135,25 @@ def _turnpike_exact(stack, energies, min_e, max_e, slack=0.01):
 
 
 def solve_turnpike(differences, slack=0.01):
-    """
-    Solve the classic (complete) Turnpike Problem.
-
-    Parameters
-    ----------
-    differences : list[float]
-        All n*(n-1)/2 pairwise distances.
-    slack : float
-        Matching tolerance.
-
-    Returns
-    -------
-    np.ndarray — sorted energy levels.
-    """
     stack = np.sort(np.array(differences, dtype=float))
     width = stack[-1]
     energies = np.array([0.0, width])
-    stack = stack[:-1]
-    result = _turnpike_exact(stack, energies, 0.0, width, slack)
+
+    # ✓ Use remove_closest instead of stack[:-1]
+    # This correctly removes exactly one copy of `width` from the stack,
+    # accounting for the {0 → width} anchor difference.
+    stack, found = remove_closest(stack, width, slack)
+    if not found:
+        raise ValueError("Could not remove anchor difference from stack.")
+
+    try:
+        result = _turnpike_exact(stack, energies, 0.0, width, slack)
+    except RecursionError:
+        raise ValueError(
+            "Recursion limit hit — increase sys.setrecursionlimit() "
+            "or reduce problem size."
+        )
+
     if result is None:
         raise ValueError("No solution found for the complete turnpike problem.")
     return result
