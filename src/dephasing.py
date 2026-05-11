@@ -3,6 +3,36 @@ import matplotlib.pyplot as plt
 from itertools import combinations
 
 
+def enumerate_bitstrings(N_q):
+    return np.array([[(m >> (N_q - 1 - q)) & 1 for q in range(N_q)]
+                     for m in range(2 ** N_q)], dtype=int)
+
+
+def predict_gamma_rates(gamma_dec_list, gamma_dep_list):
+    """
+    Predict coherence decay rates Gamma_{mn} for all pairs of computational
+    basis states from per-qubit amplitude-damping (gamma_dec = 1/T1) and
+    pure-dephasing (gamma_dep = 1/T2_phi) rates. Dephasing contribution is
+    multiplied by 2 to match the Lindblad direct evaluation.
+    """
+    kappa_T1 = np.asarray(gamma_dec_list, dtype=float)
+    kappa_phi = np.asarray(gamma_dep_list, dtype=float)
+    N_q = kappa_T1.size
+    bitstrings = enumerate_bitstrings(N_q)
+    M = bitstrings.shape[0]
+
+    rates = []
+    for m, n in combinations(range(M), 2):
+        bm = bitstrings[m]
+        bn = bitstrings[n]
+        d = (bm != bn).astype(float)
+        gamma_phi = float(np.sum(kappa_phi * d)) * 2
+        e_sum = bm.astype(float) + bn.astype(float)
+        gamma_T1 = 0.5 * float(np.sum(kappa_T1 * e_sum))
+        rates.append(gamma_phi + gamma_T1)
+    return np.array(rates)
+
+
 def calculate_dephasing_rates_upper_bound(gamma_list):
     """All subset-sums of single-qubit dephasing rates (upper bound for lambda_mn)."""
     nqubits = len(gamma_list)

@@ -18,6 +18,7 @@ from state_reconstruction import (
 from dephasing import (
     calculate_dephasing_rates_upper_bound,
     predict_dephasing_rates_exact,
+    predict_gamma_rates,
     plot_dephasing_comparison,
 )
 from lsz_experiment import LSZ_experiment
@@ -26,7 +27,7 @@ from turnpike import solve_incomplete_turnpike
 
 def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
                          ramp_time, dt, egvals_midpoint, w_noise=False,
-                         t2_rates=None):
+                         t1_rates=None, t2_rates=None):
     """
     Full diagnostic pipeline:
       1. FFT analysis -> frequencies, phases
@@ -153,12 +154,9 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
     # 7. Dephasing rate comparison (optional)
     if t2_rates is not None:
         possible_lambdas = calculate_dephasing_rates_upper_bound(t2_rates)
-        _exp_for_ops = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, 0, dt)
-        exact_lambdas = predict_dephasing_rates_exact(egvecs_t, t2_rates, _exp_for_ops.npsz_list)
-
-        plot_dephasing_comparison(lambdas, possible_lambdas)
-
-        print("Possible lambdas (upper bound):", possible_lambdas)
+        exact_lambdas = predict_gamma_rates(t1_rates, t2_rates)
+        plot_dephasing_comparison(lambdas, exact_lambdas)
+        print("Exact lambdas (predicted):", exact_lambdas)
         print("Experimental lambdas:", lambdas)
 
         results.update({
