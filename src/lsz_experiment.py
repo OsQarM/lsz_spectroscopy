@@ -83,6 +83,10 @@ class LSZ_experiment():
                 for j in range(i+1, self.n_qubits):
                     H += zz_terms[k] * self.npsz_list[i] @ self.npsz_list[j]
                     k += 1
+            
+            #Test: Small X fields
+            for i in range(self.n_qubits):
+                H += 0.01*self.npsx_list[i]
 
         return H
 
@@ -100,6 +104,10 @@ class LSZ_experiment():
                 for j in range(i+1, self.n_qubits):
                     H += zz_terms[k] * self.qtsz_list[i] * self.qtsz_list[j]
                     k += 1
+
+            #Test: Small X fields
+            for i in range(self.n_qubits):
+                H += 0.01*self.qtsx_list[i]
 
         return H
 

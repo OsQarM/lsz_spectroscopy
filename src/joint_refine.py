@@ -19,7 +19,7 @@ with all derived quantities expressed in terms of physical parameters:
     A_mn   = |u_m|² |u_n|²
     δ_mn   = 2 (φ_m - φ_n)
     ω_mn   = E_m - E_n
-    Γ_mn   = Σ_q [ 2 κ_q^φ * d_q(m,n) + (1/2) κ_q^T1 * (e_q(m) + e_q(n)) ]
+    Γ_mn   = Σ_q [ κ_q^φ * d_q(m,n) + (1/2) κ_q^T1 * (e_q(m) + e_q(n)) ]
     μ_S    = Σ_{q ∈ S} κ_q^T1
 
 where
@@ -70,24 +70,35 @@ class ParamLayout:
     """Index layout for the flat parameter vector."""
     M: int                          # number of eigenstates = 2^N_q
     Nq: int                         # number of qubits
+    freeze: frozenset = frozenset() # names of frozen parameter blocks
+    population_mode: str = "subsets"  # "subsets" | "dc" | "off"
     n_alpha: int = field(init=False)    # M - 1
     n_phi:   int = field(init=False)    # M - 1
-    n_E:     int = field(init=False)    # M - 1
+    n_E:     int = field(init=False)    # M - 1  (0 if "E" is frozen)
     n_kphi:  int = field(init=False)    # N_q
     n_kT1:   int = field(init=False)    # N_q
-    n_v:     int = field(init=False)    # 2^N_q = M
+    n_v:     int = field(init=False)    # 2^N_q (subsets), else 0
+    n_dc:    int = field(init=False)    # 1 in "dc" mode, else 0
 
     def __post_init__(self):
         self.n_alpha = self.M - 1
         self.n_phi   = self.M - 1
-        self.n_E     = self.M - 1
+        self.n_E     = 0 if "E" in self.freeze else self.M - 1
         self.n_kphi  = self.Nq
         self.n_kT1   = self.Nq
-        self.n_v     = self.M
+        if self.population_mode == "subsets":
+            self.n_v, self.n_dc = self.M, 0
+        elif self.population_mode == "dc":
+            self.n_v, self.n_dc = 0, 1
+        elif self.population_mode == "off":
+            self.n_v, self.n_dc = 0, 0
+        else:
+            raise ValueError(f"unknown population_mode: {self.population_mode}")
 
     @property
     def total(self) -> int:
-        return self.n_alpha + self.n_phi + self.n_E + self.n_kphi + self.n_kT1 + self.n_v
+        return (self.n_alpha + self.n_phi + self.n_E + self.n_kphi
+                + self.n_kT1 + self.n_v + self.n_dc)
 
     def slices(self) -> dict[str, slice]:
         i = 0
@@ -99,15 +110,16 @@ class ParamLayout:
             ("kphi",  self.n_kphi),
             ("kT1",   self.n_kT1),
             ("v",     self.n_v),
+            ("dc",    self.n_dc),
         ]:
             out[name] = slice(i, i + n)
             i += n
         return out
 
 
-def pack(alpha, phi, E, kphi, kT1, v, layout: ParamLayout) -> np.ndarray:
+def pack(alpha, phi, E, kphi, kT1, v, dc, layout: ParamLayout) -> np.ndarray:
     """Pack physical parameter blocks into a flat vector."""
-    return np.concatenate([alpha, phi, E, kphi, kT1, v])
+    return np.concatenate([alpha, phi, E, kphi, kT1, v, dc])
 
 
 def unpack(theta: jnp.ndarray, layout: ParamLayout):
@@ -120,6 +132,7 @@ def unpack(theta: jnp.ndarray, layout: ParamLayout):
         theta[s["kphi"]],
         theta[s["kT1"]],
         theta[s["v"]],
+        theta[s["dc"]],
     )
 
 
@@ -220,9 +233,11 @@ class ModelStatic:
     e_qmn: jnp.ndarray       # (N_q, M, M) excitation-sum indicator
     subset_mask: jnp.ndarray # (2^N_q, N_q) qubit-membership per subset
     pair_idx: tuple          # (rows, cols) for upper-triangular m < n
+    E_fixed: jnp.ndarray = None  # (M,) used when "E" is frozen; ignored otherwise
 
 
-def make_model_static(tau: np.ndarray, bitstrings: np.ndarray) -> ModelStatic:
+def make_model_static(tau: np.ndarray, bitstrings: np.ndarray,
+                       E_fixed: np.ndarray = None) -> ModelStatic:
     M, Nq = bitstrings.shape
     d_qmn = build_disagreement(bitstrings)
     e_qmn = build_excitation_sum(bitstrings)
@@ -234,6 +249,7 @@ def make_model_static(tau: np.ndarray, bitstrings: np.ndarray) -> ModelStatic:
         e_qmn=jnp.asarray(e_qmn),
         subset_mask=jnp.asarray(subset_mask),
         pair_idx=(jnp.asarray(rows), jnp.asarray(cols)),
+        E_fixed=None if E_fixed is None else jnp.asarray(E_fixed),
     )
 
 
@@ -243,22 +259,25 @@ def forward_model(theta: jnp.ndarray, layout: ParamLayout, static: ModelStatic) 
 
     Returns a (T,) jax array.
     """
-    alpha, phi_free, E_free, kphi, kT1, v = unpack(theta, layout)
+    alpha, phi_free, E_free, kphi, kT1, v, dc = unpack(theta, layout)
 
     # ---- Build full phase, energy, moduli vectors (with fixed φ_0 = 0, E_0 = 0)
     u_abs = spherical_to_moduli(alpha)                            # (M,)
     phi   = jnp.concatenate([jnp.array([0.0]), phi_free])         # (M,)
-    E     = jnp.concatenate([jnp.array([0.0]), E_free])           # (M,)
+    if "E" in layout.freeze:
+        E = static.E_fixed                                        # (M,)
+    else:
+        E = jnp.concatenate([jnp.array([0.0]), E_free])           # (M,)
 
     # ---- Derived pair quantities (only need m < n entries)
     rows, cols = static.pair_idx
     A_pair   = (u_abs[rows] ** 2) * (u_abs[cols] ** 2)              # (P,)
     delta    = 2.0 * (phi[rows] - phi[cols])                        # (P,)
     omega    = E[rows] - E[cols]                                    # (P,)
-    # Γ_mn = Σ_q [2 κ_q^φ d_q + 0.5 κ_q^T1 e_q]   evaluated at (m,n)
+    # Γ_mn = Σ_q [κ_q^φ d_q + 0.5 κ_q^T1 e_q]   evaluated at (m,n)
     d_pair = static.d_qmn[:, rows, cols]                            # (N_q, P)
     e_pair = static.e_qmn[:, rows, cols]                            # (N_q, P)
-    Gamma  = 2.0 * (kphi[:, None] * d_pair).sum(0) + 0.5 * (kT1[:, None] * e_pair).sum(0)
+    Gamma  = (kphi[:, None] * d_pair).sum(0) + 0.5 * (kT1[:, None] * e_pair).sum(0)
 
     # ---- Coherence (oscillatory) sector
     tau = static.tau                                                # (T,)
@@ -268,9 +287,13 @@ def forward_model(theta: jnp.ndarray, layout: ParamLayout, static: ModelStatic) 
     y_osc = 2.0 * (A_pair[None, :] * decay * jnp.cos(arg)).sum(-1)  # (T,)
 
     # ---- Population (zero-frequency) sector
-    # μ_S = subset_mask @ kT1
-    mu_S = static.subset_mask @ kT1                                 # (2^N_q,)
-    y_pop = (v[None, :] * jnp.exp(-mu_S[None, :] * tau[:, None])).sum(-1)  # (T,)
+    if layout.population_mode == "subsets":
+        mu_S = static.subset_mask @ kT1                             # (2^N_q,)
+        y_pop = (v[None, :] * jnp.exp(-mu_S[None, :] * tau[:, None])).sum(-1)
+    elif layout.population_mode == "dc":
+        y_pop = dc[0] * jnp.ones_like(tau)
+    else:  # "off"
+        y_pop = jnp.zeros_like(tau)
 
     return y_pop + y_osc
 
@@ -338,14 +361,21 @@ class WarmStart:
     kT1:      np.ndarray   # (N_q,)       from extract_rates.py
     v:        np.ndarray   # (2^N_q,)     from Stage A (population_warmstart.py)
     bitstrings: np.ndarray # (M, N_q)     from Turnpike + assignment
+    dc:       float = 0.0  # warm value for the DC sector (used in population_mode="dc")
 
 
 def warm_start_to_theta(ws: WarmStart, layout: ParamLayout) -> np.ndarray:
     """Convert a WarmStart into a flat parameter vector."""
     alpha = moduli_to_spherical(ws.u_abs)
     phi_free = ws.phi[1:].copy()
-    E_free   = ws.E[1:].copy()
-    return pack(alpha, phi_free, E_free, ws.kphi, ws.kT1, ws.v, layout)
+    E_free   = np.empty(0) if "E" in layout.freeze else ws.E[1:].copy()
+    if layout.population_mode == "subsets":
+        v_part, dc_part = ws.v, np.empty(0)
+    elif layout.population_mode == "dc":
+        v_part, dc_part = np.empty(0), np.array([float(ws.dc)])
+    else:
+        v_part, dc_part = np.empty(0), np.empty(0)
+    return pack(alpha, phi_free, E_free, ws.kphi, ws.kT1, v_part, dc_part, layout)
 
 
 def build_bounds(layout: ParamLayout) -> tuple[np.ndarray, np.ndarray]:
@@ -365,6 +395,7 @@ def build_bounds(layout: ParamLayout) -> tuple[np.ndarray, np.ndarray]:
     lo[s["kphi"]] = 0.0
     lo[s["kT1"]]  = 0.0
     lo[s["v"]]    = 0.0
+    # DC unconstrained (signal is a probability but DC may absorb baseline drift)
     # energies unbounded (free shifts already removed by fixing E_0 = 0)
     return lo, hi
 
@@ -383,6 +414,7 @@ class RefineResult:
     kphi:         np.ndarray
     kT1:          np.ndarray
     v:            np.ndarray
+    dc:           float            # scalar DC term (only meaningful in population_mode="dc")
     cost:         float            # 0.5 * ||r||² at solution
     cost_data:    float            # data-fit part only
     cost_reg:    float             # regularizer part
@@ -399,6 +431,31 @@ def _split_cost(residual_fn, theta, n_data: int) -> tuple[float, float]:
     return 0.5 * float(rd @ rd), 0.5 * float(rr @ rr)
 
 
+def _auto_x_scale(theta0: np.ndarray, layout: ParamLayout) -> np.ndarray:
+    """
+    Per-parameter scaling. Sets a characteristic magnitude for each block so
+    that scipy's TRF treats a unit step in scaled space as a sensible
+    physical change for every parameter type.
+    """
+    s = np.ones_like(theta0)
+    sl = layout.slices()
+    s[sl["alpha"]] = np.pi / 2.0
+    s[sl["phi"]]   = np.pi
+    # rates and populations: use warm magnitudes with a relative floor
+    for name in ("kphi", "kT1", "v"):
+        blk = theta0[sl[name]]
+        if blk.size == 0:
+            continue
+        scale = np.maximum(np.abs(blk), np.maximum(blk.max() * 1e-2, 1e-4))
+        s[sl[name]] = scale
+    if layout.n_dc:
+        dc0 = float(np.abs(theta0[sl["dc"]]).max())
+        s[sl["dc"]] = max(dc0, 1e-2)
+    if layout.n_E:
+        s[sl["E"]] = max(float(np.abs(theta0[sl["E"]]).max()), 1.0)
+    return s
+
+
 def refine(
     tau:        np.ndarray,
     y_meas:     np.ndarray,
@@ -409,6 +466,12 @@ def refine(
     xtol:       float = 1e-10,
     ftol:       float = 1e-10,
     gtol:       float = 1e-10,
+    freeze:     frozenset = frozenset(),
+    x_scale:    str | np.ndarray = "auto",
+    loss:       str = "linear",
+    f_scale:    float = 1.0,
+    keep_warm_if_worse: bool = True,
+    population_mode: str = "subsets",
 ) -> RefineResult:
     """
     Run the joint nonlinear LS refinement.
@@ -426,8 +489,10 @@ def refine(
     """
     M, Nq = warm.bitstrings.shape
     assert M == 1 << Nq, "warm.bitstrings must have 2^N_q rows"
-    layout = ParamLayout(M=M, Nq=Nq)
-    static = make_model_static(tau, warm.bitstrings)
+    layout = ParamLayout(M=M, Nq=Nq, freeze=frozenset(freeze),
+                          population_mode=population_mode)
+    E_fixed = warm.E if "E" in layout.freeze else None
+    static = make_model_static(tau, warm.bitstrings, E_fixed=E_fixed)
 
     theta0 = warm_start_to_theta(warm, layout)
     lo, hi = build_bounds(layout)
@@ -436,6 +501,15 @@ def refine(
     residual_np, jacobian_np = make_residual_fn(layout, static, y_meas_j, reg=reg)
 
     n_data = len(y_meas)
+
+    if isinstance(x_scale, str) and x_scale == "auto":
+        x_scale_arr = _auto_x_scale(theta0, layout)
+    else:
+        x_scale_arr = x_scale
+
+    # Warm-start cost (data-only) for comparison
+    r0 = residual_np(theta0)
+    cost_data0 = 0.5 * float(r0[:n_data] @ r0[:n_data])
 
     result = least_squares(
         fun=residual_np,
@@ -448,14 +522,32 @@ def refine(
         gtol=gtol,
         max_nfev=max_nfev,
         verbose=verbose,
+        x_scale=x_scale_arr,
+        loss=loss,
+        f_scale=f_scale,
     )
+
+    # Safeguard: if refinement increased the data cost, keep warm-start.
+    cost_data_ref, _ = _split_cost(residual_np, result.x, n_data)
+    if keep_warm_if_worse and cost_data_ref > cost_data0:
+        if verbose:
+            print(f"[refine] data cost increased "
+                  f"({cost_data0:.4e} -> {cost_data_ref:.4e}); "
+                  f"keeping warm-start.")
+        result.x = theta0
+        result.message = (result.message + " | reverted to warm-start "
+                           "(refinement worsened data fit)")
 
     # Unpack refined parameters back into physical quantities
     theta_star = result.x
-    alpha, phi_free, E_free, kphi, kT1, v = unpack(jnp.asarray(theta_star), layout)
+    alpha, phi_free, E_free, kphi, kT1, v, dc = unpack(jnp.asarray(theta_star), layout)
     u_abs = np.asarray(spherical_to_moduli(alpha))
     phi   = np.concatenate([[0.0], np.asarray(phi_free)])
-    E     = np.concatenate([[0.0], np.asarray(E_free)])
+    if "E" in layout.freeze:
+        E = np.asarray(warm.E)
+    else:
+        E = np.concatenate([[0.0], np.asarray(E_free)])
+    dc_val = float(np.asarray(dc).reshape(-1)[0]) if layout.n_dc else 0.0
 
     cost_data, cost_reg = _split_cost(residual_np, theta_star, n_data)
 
@@ -468,6 +560,7 @@ def refine(
         kphi=np.asarray(kphi),
         kT1=np.asarray(kT1),
         v=np.asarray(v),
+        dc=dc_val,
         cost=float(result.cost),
         cost_data=cost_data,
         cost_reg=cost_reg,
@@ -503,7 +596,8 @@ if __name__ == "__main__":
     static = make_model_static(tau, bitstrings)
     theta_true = pack(
         moduli_to_spherical(u_true),
-        phi_true[1:], E_true[1:], kphi_true, kT1_true, v_true, layout
+        phi_true[1:], E_true[1:], kphi_true, kT1_true, v_true,
+        np.empty(0), layout
     )
     y_true = np.asarray(forward_model(jnp.asarray(theta_true), layout, static))
 

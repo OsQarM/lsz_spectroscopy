@@ -12,8 +12,10 @@ def predict_gamma_rates(gamma_dec_list, gamma_dep_list):
     """
     Predict coherence decay rates Gamma_{mn} for all pairs of computational
     basis states from per-qubit amplitude-damping (gamma_dec = 1/T1) and
-    pure-dephasing (gamma_dep = 1/T2_phi) rates. Dephasing contribution is
-    multiplied by 2 to match the Lindblad direct evaluation.
+    pure-dephasing (gamma_dep = 1/T2_phi) rates, using the structural formula
+        Gamma_mn = sum_q [ kappa_phi_q * d_q(m,n)
+                          + (1/2) kappa_T1_q * (e_q(m) + e_q(n)) ]
+    which yields the textbook 1/(2 T1) + 1/T2_phi for a single qubit.
     """
     kappa_T1 = np.asarray(gamma_dec_list, dtype=float)
     kappa_phi = np.asarray(gamma_dep_list, dtype=float)
@@ -26,10 +28,10 @@ def predict_gamma_rates(gamma_dec_list, gamma_dep_list):
         bm = bitstrings[m]
         bn = bitstrings[n]
         d = (bm != bn).astype(float)
-        gamma_phi = float(np.sum(kappa_phi * d)) * 2
+        gamma_phi = float(np.sum(kappa_phi * d))
         e_sum = bm.astype(float) + bn.astype(float)
         gamma_T1 = 0.5 * float(np.sum(kappa_T1 * e_sum))
-        rates.append(gamma_phi + gamma_T1)
+        rates.append(2*gamma_phi + gamma_T1)
     return np.array(rates)
 
 

@@ -368,7 +368,7 @@ def _greedy_solve(observed_diffs, n_levels, e_max, slack=0.05):
 # Main solver interface
 # =============================================================================
 
-def solve_incomplete_turnpike(observed_diffs, n_levels, slack=0.05,
+def solve_incomplete_turnpike(observed_diffs, n_levels, slack=0.0001,
                               match_thresholds=None, n_candidates=3,
                               verbose=True):
     """
