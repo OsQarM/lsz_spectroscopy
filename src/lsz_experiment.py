@@ -4,15 +4,17 @@ import qutip as qt
 
 class LSZ_experiment():
 
-    def __init__(self, n_qubits, epsilon, H_target_dictionary, ramp_time, wait_time, dt,
+    def __init__(self, n_qubits, epsilon, H_target_dictionary, ramp_time, wait_time, dt, assymetry_factors = None,
                  ramp_noise=False, wait_noise=False, gamma_dec_list=None, gamma_dep_list=None):
         '''
         Params:
+        n_qubits: number of qubits
         epsilon: Coefficient of X Hamiltonian
-        alpha: Coefficient of target Hamiltonian
-        total_time: Total time of the algorithm
+        H_target_dictionary: coefficients of target Hamiltonian
+        ramp_time: time taken to ramp up
         wait_time: Waiting time in the middle of the LSZ algorithm (0 if just doing LZ)
-        max_s: maximum of s parameter. Will control slope of schedule
+        dt: time step
+        assymetry_factors: list of relative ramp speeds for Z component of qubits
         '''
 
         self.n_qubits = n_qubits
@@ -41,11 +43,19 @@ class LSZ_experiment():
         self.qtsx_list, self.qtsy_list, self.qtsz_list = self.initialize_qt_operators()
         self.npsx_list, self.npsy_list, self.npsz_list = self.initialize_np_operators()
 
+        if assymetry_factors == None:
+            self.assymetry_list = np.ones(n_qubits)
+        else:
+            self.assymetry_list = assymetry_factors
+        
         self.H0_numpy = self.build_H0_numpy()
         self.H0_qutip = self.build_H0_qutip()
 
-        self.Ht_numpy = self.build_Ht_numpy()
-        self.Ht_qutip = self.build_Ht_qutip()
+        self.Ht_numpy_common = self.build_Ht_numpy_common()
+        self.Ht_qutip_common = self.build_Ht_qutip_common()
+        
+        self.Hz_numpy_list = self.build_Hz_numpy_list()
+        self.Hz_qutip_list = self.build_Hz_qutip_list()
 
         self.dep_ops, self.dec_ops = None, None
         if self.rnoise or self.wnoise:
@@ -60,21 +70,17 @@ class LSZ_experiment():
     def build_H0_numpy(self):
         H = np.zeros((2**self.n_qubits, 2**self.n_qubits))
         for i in range(self.n_qubits):
-            H += -self.e*self.npsx_list[i]
+            H += self.e*self.npsx_list[i]
         return H
 
     def build_H0_qutip(self):
         H = 0
         for i in range(self.n_qubits):
-            H += -self.e*self.qtsx_list[i]
+            H += self.e*self.qtsx_list[i]
         return H
 
-    def build_Ht_numpy(self):
+    def build_Ht_numpy_common(self):
         H = np.zeros((2**self.n_qubits, 2**self.n_qubits))
-        local_z_terms = self.Ht_dict['one_body']
-
-        for i, weight in enumerate(local_z_terms):
-            H += weight*self.npsz_list[i]
 
         if self.n_qubits > 1:
             zz_terms = self.Ht_dict['two_body']
@@ -86,17 +92,12 @@ class LSZ_experiment():
             
             #Test: Small X fields
             for i in range(self.n_qubits):
-                H += 0.01*self.npsx_list[i]
+                H += 1*self.npsx_list[i]
 
         return H
 
-    def build_Ht_qutip(self):
+    def build_Ht_qutip_common(self):
         H = 0
-        local_z_terms = self.Ht_dict['one_body']
-
-        for i, weight in enumerate(local_z_terms):
-            H += weight*self.qtsz_list[i]
-
         if self.n_qubits > 1:
             zz_terms = self.Ht_dict['two_body']
             k = 0
@@ -107,9 +108,27 @@ class LSZ_experiment():
 
             #Test: Small X fields
             for i in range(self.n_qubits):
-                H += 0.01*self.qtsx_list[i]
+                H += 1*self.qtsx_list[i]
 
         return H
+    
+    def build_Hz_numpy_list(self):
+        H_list = []
+
+        local_z_terms = self.Ht_dict['one_body']
+        for i, weight in enumerate(local_z_terms):
+            H_list.append(weight*self.npsz_list[i])
+        
+        return H_list
+    
+    def build_Hz_qutip_list(self):
+        H_list = []
+
+        local_z_terms = self.Ht_dict['one_body']
+        for i, weight in enumerate(local_z_terms):
+            H_list.append(weight*self.qtsz_list[i])
+
+        return H_list
 
     def initialize_np_operators(self):
         sx_list, sy_list, sz_list = [], [], []
@@ -158,26 +177,36 @@ class LSZ_experiment():
 
         return dep_ops, dec_ops
 
-    def trapezoid_s(self, t):
-        return np.minimum(1, self.slope * np.minimum(t, self.tf - t))
+    def trapezoid(self, t, assym=1):
+        return np.minimum(1, assym*self.slope * np.minimum(t, self.tf - t))
 
     def H_numpy(self, t):
-        s = self.trapezoid_s(t)
-        return (1-s)*self.H0_numpy + s*self.Ht_numpy
+        s = self.trapezoid(t)
+        #Add evolution of H0 and interaction+transverse terms
+        H = (1-s)*self.H0_numpy + s*self.Ht_numpy_common
+        #Add local Z fields with assymetries
+        for i, Hi in enumerate(self.Hz_numpy_list):
+            H += self.trapezoid(t, assym=self.assymetry_list[i]) * Hi
+        return H
 
     def H_qutip(self):
-        H = [[self.H0_qutip, lambda t, args: 1 - self.trapezoid_s(t)],
-             [self.Ht_qutip, lambda t, args: self.trapezoid_s(t)]]
+        #Add evolution of H0 and interaction+transverse terms
+        H = [[self.H0_qutip, lambda t: 1 - self.trapezoid(t)],
+            [self.Ht_qutip_common, lambda t: self.trapezoid(t)]]
+        #Add local Z fields with assymetries
+        H += [[Hi, lambda t, i=i: self.trapezoid(t, assym=self.assymetry_list[i])]
+            for i, Hi in enumerate(self.Hz_qutip_list)]
         return H
 
     def show_schedule(self, n_steps):
         t_list = np.linspace(self.to, self.tf, n_steps)
-        s_list = np.zeros(len(t_list))
+        common_schedule = np.array([self.trapezoid(t) for t in t_list])
+        hz_schedules = [
+            np.array([self.trapezoid(t, assym=self.assymetry_list[i]) for t in t_list])
+            for i in range(len(self.Hz_numpy_list))
+        ]
+        return t_list, common_schedule, hz_schedules
 
-        for i, t in enumerate(t_list):
-            s_list[i] = self.trapezoid_s(t)
-
-        return t_list, s_list
 
     def show_spectrum(self, n_steps):
         t_list = np.linspace(self.to, self.tf, n_steps)
@@ -197,7 +226,12 @@ class LSZ_experiment():
         t_list_w = np.linspace(self.tr, self.tr + self.tw, max(100, int(self.tw / self.dt)))
         t_list_r2 = np.linspace(self.tr + self.tw, self.tf, max(100, int(self.tr / self.dt)))
 
-        psi0 = qt.tensor([1/np.sqrt(2)*(self.ket0 + self.ket1)]*self.n_qubits)
+        psi0 = qt.tensor([1/np.sqrt(2)*(self.ket0 - self.ket1)]*self.n_qubits)
+
+        # plus = 1/(np.sqrt(2))*(qt.tensor([self.ket0, self.ket1]) + qt.tensor([self.ket1, self.ket0]))
+        # minus = 1/(np.sqrt(2))*(qt.tensor([self.ket0, self.ket1]) - qt.tensor([self.ket1, self.ket0]))
+
+        # psi0 = 1/2*(qt.tensor([self.ket0]*2) + qt.tensor([self.ket1]*2) + plus + minus)
 
         H = self.H_qutip()
 
@@ -248,13 +282,13 @@ class LSZ_experiment():
         return populations
 
 
-def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt,
+def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, assym_list = None,
                          r_noise=False, w_noise=False,
                          gamma_dec_list=None, gamma_dep_list=None):
     """Run LSZ experiment over a list of wait times, returning P(ground) vs tw."""
     pc_list = []
     for wait_time in tw_l:
-        experiment = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, wait_time, dt,
+        experiment = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, wait_time, dt, assym_list,
                                     ramp_noise=r_noise, wait_noise=w_noise,
                                     gamma_dec_list=gamma_dec_list, gamma_dep_list=gamma_dep_list)
         _, _, ramp_2_sim = experiment.time_evolution()

@@ -46,7 +46,7 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
     experimental_freqs, experimental_phases = fourier_analysis(
         pc_list, tw_l,
         n_peaks=(2**nqubits) * (2**nqubits - 1) // 2,
-        prominence_threshold=0.05, zero_pad_factor=8, window='blackmanharris'
+        prominence_threshold=0.05, zero_pad_factor=32, window='hann'
     )
 
     # 2. Global fit
@@ -117,7 +117,7 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
 
     # 6. Validate against exact state vector
     validation_exp = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, 0, dt)
-    target_H = validation_exp.build_Ht_numpy()
+    target_H = validation_exp.H_numpy(validation_exp.tr)
     u_exact_amplitudes, u_exact_phases_rel, egvals_t, egvecs_t = validate_state_vector(
         validation_exp, target_H
     )
