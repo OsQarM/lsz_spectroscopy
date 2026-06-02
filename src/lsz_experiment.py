@@ -5,16 +5,22 @@ import qutip as qt
 class LSZ_experiment():
 
     def __init__(self, n_qubits, epsilon, H_target_dictionary, ramp_time, wait_time, dt, assymetry_factors = None,
-                 ramp_noise=False, wait_noise=False, gamma_dec_list=None, gamma_dep_list=None):
+                 ramp_noise=False, wait_noise=False, gamma_dec_list=None, gamma_dep_list=None,
+                 initial_state=None):
         '''
         Params:
         n_qubits: number of qubits
         epsilon: Coefficient of X Hamiltonian
-        H_target_dictionary: coefficients of target Hamiltonian
+        H_target_dictionary: coefficients of target Hamiltonian. Keys:
+            'one_body'  -> list of local Z weights (length n_qubits)
+            'local_x'   -> list of local X weights (length n_qubits) added to target H
+            'two_body'  -> list of ZZ couplings (length n_qubits*(n_qubits-1)/2)
         ramp_time: time taken to ramp up
         wait_time: Waiting time in the middle of the LSZ algorithm (0 if just doing LZ)
         dt: time step
         assymetry_factors: list of relative ramp speeds for Z component of qubits
+        initial_state: qutip ket used to initialize the time evolution and the diagnostics.
+            If None, defaults to the tensor product of |-> states.
         '''
 
         self.n_qubits = n_qubits
@@ -47,6 +53,11 @@ class LSZ_experiment():
             self.assymetry_list = np.ones(n_qubits)
         else:
             self.assymetry_list = assymetry_factors
+
+        if initial_state is None:
+            self.initial_state = qt.tensor([1/np.sqrt(2)*(self.ket0 - self.ket1)]*self.n_qubits)
+        else:
+            self.initial_state = initial_state
         
         self.H0_numpy = self.build_H0_numpy()
         self.H0_qutip = self.build_H0_qutip()
@@ -80,7 +91,7 @@ class LSZ_experiment():
         return H
 
     def build_Ht_numpy_common(self):
-        H = np.zeros((2**self.n_qubits, 2**self.n_qubits))
+        H = np.zeros((2**self.n_qubits, 2**self.n_qubits), dtype=complex)
 
         if self.n_qubits > 1:
             zz_terms = self.Ht_dict['two_body']
@@ -89,10 +100,10 @@ class LSZ_experiment():
                 for j in range(i+1, self.n_qubits):
                     H += zz_terms[k] * self.npsz_list[i] @ self.npsz_list[j]
                     k += 1
-            
-            #Test: Small X fields
-            for i in range(self.n_qubits):
-                H += 1*self.npsx_list[i]
+
+        local_x_terms = self.Ht_dict.get('local_x', np.zeros(self.n_qubits))
+        for i, weight in enumerate(local_x_terms):
+            H += weight * self.npsx_list[i]
 
         return H
 
@@ -106,16 +117,16 @@ class LSZ_experiment():
                     H += zz_terms[k] * self.qtsz_list[i] * self.qtsz_list[j]
                     k += 1
 
-            #Test: Small X fields
-            for i in range(self.n_qubits):
-                H += 1*self.qtsx_list[i]
+        local_x_terms = self.Ht_dict.get('local_x', np.zeros(self.n_qubits))
+        for i, weight in enumerate(local_x_terms):
+            H += weight * self.qtsx_list[i]
 
         return H
     
     def build_Hz_numpy_list(self):
         H_list = []
 
-        local_z_terms = self.Ht_dict['one_body']
+        local_z_terms = self.Ht_dict['local_z']
         for i, weight in enumerate(local_z_terms):
             H_list.append(weight*self.npsz_list[i])
         
@@ -124,7 +135,7 @@ class LSZ_experiment():
     def build_Hz_qutip_list(self):
         H_list = []
 
-        local_z_terms = self.Ht_dict['one_body']
+        local_z_terms = self.Ht_dict['local_z']
         for i, weight in enumerate(local_z_terms):
             H_list.append(weight*self.qtsz_list[i])
 
@@ -178,7 +189,12 @@ class LSZ_experiment():
         return dep_ops, dec_ops
 
     def trapezoid(self, t, assym=1):
-        return np.minimum(1, assym*self.slope * np.minimum(t, self.tf - t))
+        rising  = assym * self.slope * t
+        falling = self.slope * (self.tf - t)
+        return np.minimum(1, np.minimum(rising, falling))
+    
+    # def trapezoid(self, t, assym=1):
+    #     return np.minimum(1, assym*self.slope * np.minimum(t, self.tf - t))
 
     def H_numpy(self, t):
         s = self.trapezoid(t)
@@ -226,12 +242,7 @@ class LSZ_experiment():
         t_list_w = np.linspace(self.tr, self.tr + self.tw, max(100, int(self.tw / self.dt)))
         t_list_r2 = np.linspace(self.tr + self.tw, self.tf, max(100, int(self.tr / self.dt)))
 
-        psi0 = qt.tensor([1/np.sqrt(2)*(self.ket0 - self.ket1)]*self.n_qubits)
-
-        # plus = 1/(np.sqrt(2))*(qt.tensor([self.ket0, self.ket1]) + qt.tensor([self.ket1, self.ket0]))
-        # minus = 1/(np.sqrt(2))*(qt.tensor([self.ket0, self.ket1]) - qt.tensor([self.ket1, self.ket0]))
-
-        # psi0 = 1/2*(qt.tensor([self.ket0]*2) + qt.tensor([self.ket1]*2) + plus + minus)
+        psi0 = self.initial_state
 
         H = self.H_qutip()
 
@@ -281,17 +292,56 @@ class LSZ_experiment():
 
         return populations
 
+    def calculate_eigenbasis_populations(self, sim_res):
+        """Populations in the eigenbasis of H(tr) (the post-quench target H)
+        at every timestep.
+
+        Returns array of shape (n_timesteps, 2**n_qubits).
+        """
+        H_target = self.H_numpy(self.tr)
+        _, eigvecs = np.linalg.eigh(H_target)
+
+        n_states = 2**self.n_qubits
+        n_steps = len(sim_res.states)
+        pops = np.zeros((n_steps, n_states))
+
+        for s, state in enumerate(sim_res.states):
+            if state.type == 'ket':
+                psi = state.full().flatten()
+                overlaps = eigvecs.conj().T @ psi
+                pops[s, :] = np.real(overlaps * overlaps.conj())
+            else:
+                rho = state.full()
+                M = eigvecs.conj().T @ rho @ eigvecs
+                pops[s, :] = np.real(np.diag(M))
+
+        return pops
+
 
 def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, assym_list = None,
                          r_noise=False, w_noise=False,
-                         gamma_dec_list=None, gamma_dep_list=None):
+                         gamma_dec_list=None, gamma_dep_list=None, initial_state=None):
     """Run LSZ experiment over a list of wait times, returning P(ground) vs tw."""
     pc_list = []
     for wait_time in tw_l:
         experiment = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, wait_time, dt, assym_list,
                                     ramp_noise=r_noise, wait_noise=w_noise,
-                                    gamma_dec_list=gamma_dec_list, gamma_dep_list=gamma_dep_list)
+                                    gamma_dec_list=gamma_dec_list, gamma_dep_list=gamma_dep_list,
+                                    initial_state=initial_state)
         _, _, ramp_2_sim = experiment.time_evolution()
-        populations = experiment.calculate_populations(ramp_2_sim)
-        pc_list.append(np.real(populations[0]))
+
+        #Population of GS of H0
+        # populations = experiment.calculate_populations(ramp_2_sim)
+        # pc_list.append(np.real(populations[0]))
+
+        #Population of Psi0
+        psi_init = experiment.initial_state.full().flatten()
+        final = ramp_2_sim.states[-1]
+        if final.type == 'ket':
+            psi_f = final.full().flatten()
+            pc = np.abs(np.vdot(psi_init, psi_f))**2
+        else:
+            rho = final.full()
+            pc = np.real(np.vdot(psi_init, rho @ psi_init))
+        pc_list.append(float(pc))
     return np.array(pc_list)

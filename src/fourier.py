@@ -103,6 +103,194 @@ def fourier_analysis(pc_list, tw_l, n_peaks=28, prominence_threshold=0.01,
     return freqs_refined, phases
 
 
+def fourier_analysis_iterative(pc_list, tw_l, n_peaks=28,
+                               prominence_threshold=0.01, zero_pad_factor=32,
+                               window='hann', max_rounds=None,
+                               min_freq_separation=None, verbose=False):
+    """
+    Iterative (CLEAN-style) spectral analysis.
+
+    Each round:
+      1. Run an FFT on the current residual signal.
+      2. Pick the single strongest peak (parabolic interpolation for freq/phase).
+      3. Fit that peak's amplitude, decay rate, and phase in the time domain
+         to the residual.
+      4. Subtract the fitted damped cosine from the residual.
+      5. Repeat until `n_peaks` are collected, no peak is found, or `max_rounds`
+         is reached.
+
+    Returns (freqs, phases) like `fourier_analysis`, plus plots the ORIGINAL
+    spectrum with all collected peaks marked.
+    """
+    from scipy.signal import find_peaks, get_window
+    from scipy.optimize import curve_fit
+
+    y_orig = np.asarray(pc_list, dtype=float)
+    t = np.asarray(tw_l, dtype=float)
+    N = len(y_orig)
+    dt = t[1] - t[0]
+    dc = y_orig.mean()
+
+    win = get_window(window, N)
+    cg = win.sum() / N
+    N_pad = zero_pad_factor * N
+
+    # Original spectrum, kept only for final plotting.
+    spec_orig = np.fft.rfft((y_orig - dc) * win, n=N_pad)
+    freqs_axis = np.fft.rfftfreq(N_pad, dt)
+    mag_orig = np.abs(spec_orig)[1:]
+    frq_axis = freqs_axis[1:]
+
+    residual = y_orig.copy()
+    collected_freqs, collected_phases = [], []
+    collected_amps, collected_lambdas = [], []
+
+    if max_rounds is None:
+        max_rounds = n_peaks
+
+    df_axis = frq_axis[1] - frq_axis[0]
+    # Default minimum separation: a few raw FFT bins (independent of zero-padding).
+    # Two peaks closer than this are almost certainly the same mode re-detected.
+    if min_freq_separation is None:
+        raw_df = 1.0 / (N * dt)
+        min_freq_separation = 1.5 * raw_df
+
+    def _ranked_candidates(sig):
+        sig_dc = sig.mean()
+        sig_win = (sig - sig_dc) * win
+        spc = np.fft.rfft(sig_win, n=N_pad)
+        mag = np.abs(spc)[1:]
+        spc_pos = spc[1:]
+        min_dist = max(1, zero_pad_factor // 2)
+        peak_locs, _ = find_peaks(mag, distance=min_dist,
+                                  prominence=0.02 * mag.max())
+        if len(peak_locs) == 0:
+            return []
+        # Order strongest-first.
+        peak_locs = peak_locs[np.argsort(mag[peak_locs])[::-1]]
+
+        log_mag = np.log(mag + 1e-30)
+        candidates = []
+        for k in peak_locs:
+            if mag[k] < prominence_threshold * mag_orig.max():
+                break  # remaining are weaker, no point continuing
+            k_l = max(k - 1, 0)
+            k_r = min(k + 1, len(mag) - 1)
+            a_, b_, c_ = log_mag[k_l], log_mag[k], log_mag[k_r]
+            if k_l != k_r:
+                delta = 0.5 * (a_ - c_) / (a_ - 2*b_ + c_ + 1e-30)
+                delta = float(np.clip(delta, -1.0, 1.0))
+            else:
+                delta = 0.0
+            f_refined = frq_axis[k] + delta * df_axis
+            phase_raw = np.angle(spc_pos[k])
+            phase = (phase_raw - 2 * np.pi * f_refined * t[0]) % (2 * np.pi)
+            amp_seed = 2.0 * mag[k] / (N * cg)
+            candidates.append((f_refined, phase, amp_seed))
+        return candidates
+
+    for rnd in range(max_rounds):
+        if len(collected_freqs) >= n_peaks:
+            break
+        candidates = _ranked_candidates(residual)
+        if not candidates:
+            if verbose:
+                print(f"[round {rnd}] no peak above threshold, stopping.")
+            break
+
+        # Reject candidates too close to an already-collected peak — those are
+        # leftover lobes from imperfect subtraction, not new modes.
+        pick = None
+        for cand in candidates:
+            f_cand = cand[0]
+            if collected_freqs and np.min(np.abs(np.array(collected_freqs) - f_cand)) < min_freq_separation:
+                if verbose:
+                    print(f"[round {rnd}] skipping f={f_cand:.6f} "
+                          f"(within {min_freq_separation:.4g} of an existing peak)")
+                continue
+            pick = cand
+            break
+
+        if pick is None:
+            if verbose:
+                print(f"[round {rnd}] all candidates are duplicates, stopping.")
+            break
+        f0, phi0, A0 = pick
+
+        # Time-domain fit of a single damped cosine on the residual.
+        dc_seed = residual.mean()
+
+        def model(t_, dc_, A_, lam_, f_, phi_):
+            return dc_ + 2*A_ * np.exp(-lam_ * t_) * np.cos(2*np.pi*f_*t_ + phi_)
+
+        p0 = [dc_seed, max(A0, 1e-4), 1e-3, f0, phi0]
+        lb = [-np.inf, 0.0, 0.0, max(f0 - 5*df_axis, 0.0), -np.inf]
+        ub = [ np.inf, np.inf, np.inf, f0 + 5*df_axis,        np.inf]
+        try:
+            popt, _ = curve_fit(model, t, residual, p0=p0, bounds=(lb, ub),
+                                maxfev=20000, xtol=1e-10, ftol=1e-10)
+            dc_f, A_f, lam_f, f_f, phi_f = popt
+        except Exception as e:
+            if verbose:
+                print(f"[round {rnd}] fit failed ({e}); using seed values.")
+            dc_f, A_f, lam_f, f_f, phi_f = dc_seed, A0, 1e-3, f0, phi0
+
+        residual = residual - 2*A_f * np.exp(-lam_f * t) * np.cos(2*np.pi*f_f*t + phi_f)
+
+        collected_freqs.append(f_f)
+        collected_phases.append(phi_f % (2*np.pi))
+        collected_amps.append(A_f)
+        collected_lambdas.append(lam_f)
+
+        if verbose:
+            print(f"[round {rnd}] f={f_f:.6f}  A={A_f:.4f}  "
+                  f"lam={lam_f:.4f}  phi={phi_f:.3f}")
+
+    freqs_out = np.array(collected_freqs)
+    phases_out = np.array(collected_phases)
+    amps_out = np.array(collected_amps)
+
+    order = np.argsort(amps_out)[::-1]
+    freqs_out = freqs_out[order]
+    phases_out = phases_out[order]
+    amps_out = amps_out[order]
+
+    # Plot: original spectrum with all collected peaks marked.
+    x_max = (freqs_out.max() * 1.2) if len(freqs_out) else frq_axis[-1]
+    colors = plt.cm.tab10.colors
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    ax = axes[0]
+    ax.plot(frq_axis, mag_orig, color='#cc4444', lw=1.2, label='original')
+    for i, f in enumerate(freqs_out):
+        ax.axvline(f, color=colors[i % len(colors)], lw=1.0,
+                   linestyle='--', alpha=0.8)
+    ax.set_xlabel('Frequency')
+    ax.set_ylabel('|FFT|')
+    ax.set_xlim(0, x_max)
+    ax.set_title(f'Spectrum with {len(freqs_out)} iteratively recovered peaks')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1]
+    ax.bar(range(len(amps_out)), amps_out,
+           color=[colors[i % len(colors)] for i in range(len(amps_out))])
+    ax.set_xlabel('Mode index (sorted by amplitude)')
+    ax.set_ylabel('Fitted amplitude')
+    ax.set_title('Mode Amplitudes (time-domain fit)')
+    ax.grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
+    plt.show()
+
+    print(f"\n{'#':>3}  {'Frequency':>14}  {'Phase (rad)':>12}  {'Amp':>10}  {'Lambda':>10}")
+    print("-" * 60)
+    for i, (f, p, A, lam) in enumerate(zip(freqs_out, phases_out, amps_out,
+                                           np.array(collected_lambdas)[order])):
+        print(f"{i+1:>3}  {f:>14.6f}  {p:>12.4f}  {A:>10.5f}  {lam:>10.5f}")
+
+    return freqs_out, phases_out
+
+
 def fit_decay_rates(pc_list, tw_l, freqs_detected, phases_detected, noise=True):
     """
     Fit amplitudes (and optionally decay rates) and DC offset globally to:
