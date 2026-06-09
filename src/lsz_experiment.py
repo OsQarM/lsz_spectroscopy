@@ -5,6 +5,7 @@ import qutip as qt
 class LSZ_experiment():
 
     def __init__(self, n_qubits, epsilon, H_target_dictionary, ramp_time, wait_time, dt, assymetry_factors = None,
+                 down_assymetry_factors=None,
                  ramp_noise=False, wait_noise=False, gamma_dec_list=None, gamma_dep_list=None,
                  initial_state=None):
         '''
@@ -53,6 +54,11 @@ class LSZ_experiment():
             self.assymetry_list = np.ones(n_qubits)
         else:
             self.assymetry_list = assymetry_factors
+
+        if down_assymetry_factors is None:
+            self.down_assymetry_list = np.ones(n_qubits)
+        else:
+            self.down_assymetry_list = down_assymetry_factors
 
         if initial_state is None:
             self.initial_state = qt.tensor([1/np.sqrt(2)*(self.ket0 - self.ket1)]*self.n_qubits)
@@ -188,9 +194,9 @@ class LSZ_experiment():
 
         return dep_ops, dec_ops
 
-    def trapezoid(self, t, assym=1):
+    def trapezoid(self, t, assym=1, down_assym=1):
         rising  = assym * self.slope * t
-        falling = self.slope * (self.tf - t)
+        falling = down_assym * self.slope * (self.tf - t)
         return np.minimum(1, np.minimum(rising, falling))
     
     # def trapezoid(self, t, assym=1):
@@ -202,7 +208,8 @@ class LSZ_experiment():
         H = (1-s)*self.H0_numpy + s*self.Ht_numpy_common
         #Add local Z fields with assymetries
         for i, Hi in enumerate(self.Hz_numpy_list):
-            H += self.trapezoid(t, assym=self.assymetry_list[i]) * Hi
+            H += self.trapezoid(t, assym=self.assymetry_list[i],
+                                down_assym=self.down_assymetry_list[i]) * Hi
         return H
 
     def H_qutip(self):
@@ -210,7 +217,9 @@ class LSZ_experiment():
         H = [[self.H0_qutip, lambda t: 1 - self.trapezoid(t)],
             [self.Ht_qutip_common, lambda t: self.trapezoid(t)]]
         #Add local Z fields with assymetries
-        H += [[Hi, lambda t, i=i: self.trapezoid(t, assym=self.assymetry_list[i])]
+        H += [[Hi, lambda t, i=i: self.trapezoid(t,
+                                                 assym=self.assymetry_list[i],
+                                                 down_assym=self.down_assymetry_list[i])]
             for i, Hi in enumerate(self.Hz_qutip_list)]
         return H
 
@@ -218,7 +227,8 @@ class LSZ_experiment():
         t_list = np.linspace(self.to, self.tf, n_steps)
         common_schedule = np.array([self.trapezoid(t) for t in t_list])
         hz_schedules = [
-            np.array([self.trapezoid(t, assym=self.assymetry_list[i]) for t in t_list])
+            np.array([self.trapezoid(t, assym=self.assymetry_list[i],
+                                     down_assym=self.down_assymetry_list[i]) for t in t_list])
             for i in range(len(self.Hz_numpy_list))
         ]
         return t_list, common_schedule, hz_schedules
@@ -319,12 +329,14 @@ class LSZ_experiment():
 
 
 def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, assym_list = None,
+                         down_assym_list=None,
                          r_noise=False, w_noise=False,
                          gamma_dec_list=None, gamma_dep_list=None, initial_state=None):
     """Run LSZ experiment over a list of wait times, returning P(ground) vs tw."""
     pc_list = []
     for wait_time in tw_l:
         experiment = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, wait_time, dt, assym_list,
+                                    down_assymetry_factors=down_assym_list,
                                     ramp_noise=r_noise, wait_noise=w_noise,
                                     gamma_dec_list=gamma_dec_list, gamma_dep_list=gamma_dep_list,
                                     initial_state=initial_state)
