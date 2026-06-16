@@ -2,12 +2,29 @@ import numpy as np
 import qutip as qt
 
 
+# Module-level generator. Call set_global_seed(seed) once at the start of a
+# sweep to make every subsequent LSZ_experiment draw reproducible (but distinct)
+# noise. Each constructor pulls from this generator unless the user passes
+# their own `rng`.
+_GLOBAL_RNG = np.random.default_rng()
+
+
+def set_global_seed(seed):
+    """Seed the module-level RNG used by LSZ_experiment for ramp/wait errors.
+
+    Call this once before a sweep. Each experiment instance will then draw a
+    different noise realization, but the whole sequence is reproducible.
+    """
+    global _GLOBAL_RNG
+    _GLOBAL_RNG = np.random.default_rng(seed)
+
+
 class LSZ_experiment():
 
-    def __init__(self, n_qubits, epsilon, H_target_dictionary, ramp_time, wait_time, dt, assymetry_factors = None,
+    def __init__(self, n_qubits, epsilon, H_target_dictionary, ramp_time, wait_time, dt, up_assymetry_factors = None,
                  down_assymetry_factors=None,
                  ramp_noise=False, wait_noise=False, gamma_dec_list=None, gamma_dep_list=None,
-                 initial_state=None):
+                 initial_state=None, ramp_error = 0.0, wait_error = 0.0, rng=None):
         '''
         Params:
         n_qubits: number of qubits
@@ -23,11 +40,13 @@ class LSZ_experiment():
         initial_state: qutip ket used to initialize the time evolution and the diagnostics.
             If None, defaults to the tensor product of |-> states.
         '''
-
+        
+        #General parameters and Hamiltonian definition
         self.n_qubits = n_qubits
         self.e = epsilon
         self.Ht_dict = H_target_dictionary
 
+        #Schedule times and timestep size
         self.to = 0
         self.tw = wait_time
         self.tr = ramp_time
@@ -36,11 +55,50 @@ class LSZ_experiment():
         self.tf = 2*self.tr + self.tw
         self.slope = 1/self.tr
 
+        #T1 and T2 noise parameters
         self.rnoise = ramp_noise
         self.wnoise = wait_noise
         self.dec_rates = gamma_dec_list
         self.dep_rates = gamma_dep_list
 
+        #Ramp asymetry
+        if up_assymetry_factors == None:
+            self.up_assymetry_list = np.ones(n_qubits)
+        else:
+            self.up_assymetry_list = up_assymetry_factors
+
+        if down_assymetry_factors is None:
+            self.down_assymetry_list = np.ones(n_qubits)
+        else:
+            self.down_assymetry_list = down_assymetry_factors
+
+        #Random ramp/wait errors. Each LSZ_experiment instance pre-draws its
+        #own Gaussian noise grid so that H(t) stays a deterministic function
+        #for qutip's ODE solver (different bin -> different sample).
+        self.ramp_e = ramp_error
+        self.wait_e = wait_error
+
+        if rng is None:
+            rng = _GLOBAL_RNG
+        elif not isinstance(rng, np.random.Generator):
+            rng = np.random.default_rng(rng)
+
+        # Per-qubit sample per dt-bin for the slope multiplier and the
+        # wait-plateau amplitude. We over-allocate by one bin so the lookup
+        # at t == tf lands safely in range.
+        n_bins_total = int(np.ceil(self.tf / self.dt)) + 1
+        if self.ramp_e > 0:
+            self.ramp_noise_grid = rng.standard_normal((n_bins_total, n_qubits))
+        else:
+            self.ramp_noise_grid = np.zeros((n_bins_total, n_qubits))
+
+        if self.wait_e > 0:
+            self.wait_noise_grid = rng.standard_normal((n_bins_total, n_qubits))
+        else:
+            self.wait_noise_grid = np.zeros((n_bins_total, n_qubits))
+
+
+        #Initialize operators
         self.npsx, self.npsy, self.npsz = np.array([[0, 1], [1, 0]]), np.array([[0, -1j], [1j, 0]]), np.array([[1, 0], [0, -1]])
         self.qtsx, self.qtsy, self.qtsz = qt.sigmax(), qt.sigmay(), qt.sigmaz()
 
@@ -49,22 +107,8 @@ class LSZ_experiment():
 
         self.qtsx_list, self.qtsy_list, self.qtsz_list = self.initialize_qt_operators()
         self.npsx_list, self.npsy_list, self.npsz_list = self.initialize_np_operators()
-
-        if assymetry_factors == None:
-            self.assymetry_list = np.ones(n_qubits)
-        else:
-            self.assymetry_list = assymetry_factors
-
-        if down_assymetry_factors is None:
-            self.down_assymetry_list = np.ones(n_qubits)
-        else:
-            self.down_assymetry_list = down_assymetry_factors
-
-        if initial_state is None:
-            self.initial_state = qt.tensor([1/np.sqrt(2)*(self.ket0 - self.ket1)]*self.n_qubits)
-        else:
-            self.initial_state = initial_state
         
+        #Build Hamiltonians
         self.H0_numpy = self.build_H0_numpy()
         self.H0_qutip = self.build_H0_qutip()
 
@@ -74,9 +118,16 @@ class LSZ_experiment():
         self.Hz_numpy_list = self.build_Hz_numpy_list()
         self.Hz_qutip_list = self.build_Hz_qutip_list()
 
+        #Create noise operators
         self.dep_ops, self.dec_ops = None, None
         if self.rnoise or self.wnoise:
             self.dep_ops, self.dec_ops = self.build_noise_operators()
+        
+        #Custom initial state
+        if initial_state is None:
+            self.initial_state = qt.tensor([1/np.sqrt(2)*(self.ket0 - self.ket1)]*self.n_qubits)
+        else:
+            self.initial_state = initial_state
 
     def kron_n(self, ops):
         out = ops[0]
@@ -194,10 +245,36 @@ class LSZ_experiment():
 
         return dep_ops, dec_ops
 
-    def trapezoid(self, t, assym=1, down_assym=1):
-        rising  = assym * self.slope * t
-        falling = down_assym * self.slope * (self.tf - t)
-        return np.minimum(1, np.minimum(rising, falling))
+    def trapezoid(self, t, up_assym=1, down_assym=1, qubit_idx=None):
+        # Bin lookup. Clipped so values at t == tf land in the last valid bin.
+        bin_idx = int(np.clip(t / self.dt, 0, self.ramp_noise_grid.shape[0] - 1))
+
+        #Generate errors
+        if qubit_idx is not None:
+            slope_offset = self.ramp_e * self.ramp_noise_grid[bin_idx, qubit_idx]
+            cap = 1.0 + self.wait_e * self.wait_noise_grid[bin_idx, qubit_idx]
+        else:
+            slope_offset = 0.0
+            cap = 1.0
+
+        # Endpoints pinned to 0 for all ramps 
+        if t <= self.to or t >= self.tf:
+            return 0.0
+
+        #Return 1 (+ error) during wait time
+        if self.tr <= t <= self.tr + self.tw:
+            return cap
+
+        # Return trapezoid (rising or falling + error). The asymmetry factor
+        # makes the ramp steeper so it reaches 1 *earlier*; clamping the clean
+        # ramp to 1 keeps a fast ramp from overshooting past 1 and holds it at
+        # the top until the wait window. The slope error is added *after* the
+        # clamp so the noise -- unlike the asymmetry -- is still free to push
+        # the value above 1.
+        if t < self.tr:
+            return np.minimum(1.0, up_assym * self.slope * t) + slope_offset
+        else:
+            return np.minimum(1.0, down_assym * self.slope * (self.tf - t)) + slope_offset
     
     # def trapezoid(self, t, assym=1):
     #     return np.minimum(1, assym*self.slope * np.minimum(t, self.tf - t))
@@ -206,20 +283,22 @@ class LSZ_experiment():
         s = self.trapezoid(t)
         #Add evolution of H0 and interaction+transverse terms
         H = (1-s)*self.H0_numpy + s*self.Ht_numpy_common
-        #Add local Z fields with assymetries
+        #Add local Z fields with assymetries (per-qubit wait-plateau noise)
         for i, Hi in enumerate(self.Hz_numpy_list):
-            H += self.trapezoid(t, assym=self.assymetry_list[i],
-                                down_assym=self.down_assymetry_list[i]) * Hi
+            H += self.trapezoid(t, up_assym=self.up_assymetry_list[i],
+                                down_assym=self.down_assymetry_list[i],
+                                qubit_idx=i) * Hi
         return H
 
     def H_qutip(self):
         #Add evolution of H0 and interaction+transverse terms
         H = [[self.H0_qutip, lambda t: 1 - self.trapezoid(t)],
             [self.Ht_qutip_common, lambda t: self.trapezoid(t)]]
-        #Add local Z fields with assymetries
+        #Add local Z fields with assymetries (per-qubit wait-plateau noise)
         H += [[Hi, lambda t, i=i: self.trapezoid(t,
-                                                 assym=self.assymetry_list[i],
-                                                 down_assym=self.down_assymetry_list[i])]
+                                                 up_assym=self.up_assymetry_list[i],
+                                                 down_assym=self.down_assymetry_list[i],
+                                                 qubit_idx=i)]
             for i, Hi in enumerate(self.Hz_qutip_list)]
         return H
 
@@ -227,8 +306,9 @@ class LSZ_experiment():
         t_list = np.linspace(self.to, self.tf, n_steps)
         common_schedule = np.array([self.trapezoid(t) for t in t_list])
         hz_schedules = [
-            np.array([self.trapezoid(t, assym=self.assymetry_list[i],
-                                     down_assym=self.down_assymetry_list[i]) for t in t_list])
+            np.array([self.trapezoid(t, up_assym=self.up_assymetry_list[i],
+                                     down_assym=self.down_assymetry_list[i],
+                                     qubit_idx=i) for t in t_list])
             for i in range(len(self.Hz_numpy_list))
         ]
         return t_list, common_schedule, hz_schedules
@@ -328,18 +408,43 @@ class LSZ_experiment():
         return pops
 
 
-def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, assym_list = None,
+def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, up_assym_list = None,
                          down_assym_list=None,
                          r_noise=False, w_noise=False,
-                         gamma_dec_list=None, gamma_dep_list=None, initial_state=None):
-    """Run LSZ experiment over a list of wait times, returning P(ground) vs tw."""
+                         gamma_dec_list=None, gamma_dep_list=None, initial_state=None,
+                         ramp_error=0.0, wait_error=0.0, rng=None,
+                         show_progress=True):
+    """Run LSZ experiment over a list of wait times, returning P(ground) vs tw.
+
+    `ramp_error` / `wait_error` are Gaussian noise sizes on the ramp slope and
+    wait-plateau amplitude. Each experiment instance draws its own realization
+    from the module-level RNG (call `set_global_seed(seed)` once before the
+    sweep for reproducibility) or from a user-supplied `rng`.
+
+    Progress is reported weighted by each run's total simulated time
+    (2*ramp_time + tw), not by iteration count, so the percentage tracks
+    actual wall-clock work rather than how many wait-times have been done.
+    """
+    import sys
+    import time
+
+    if rng is not None and not isinstance(rng, np.random.Generator):
+        rng = np.random.default_rng(rng)
+
+    tw_arr = np.asarray(tw_l, dtype=float)
+    weights = 2 * ramp_time + tw_arr           # simulated-time per iteration
+    total_work = float(weights.sum())
+    done_work = 0.0
+    t_start = time.perf_counter()
+
     pc_list = []
-    for wait_time in tw_l:
-        experiment = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, wait_time, dt, assym_list,
+    for i, wait_time in enumerate(tw_arr):
+        experiment = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, float(wait_time), dt, up_assym_list,
                                     down_assymetry_factors=down_assym_list,
                                     ramp_noise=r_noise, wait_noise=w_noise,
                                     gamma_dec_list=gamma_dec_list, gamma_dep_list=gamma_dep_list,
-                                    initial_state=initial_state)
+                                    initial_state=initial_state,
+                                    ramp_error=ramp_error, wait_error=wait_error, rng=rng)
         _, _, ramp_2_sim = experiment.time_evolution()
 
         #Population of GS of H0
@@ -356,4 +461,21 @@ def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, a
             rho = final.full()
             pc = np.real(np.vdot(psi_init, rho @ psi_init))
         pc_list.append(float(pc))
+
+        done_work += weights[i]
+        if show_progress:
+            frac = done_work / total_work if total_work > 0 else 1.0
+            elapsed = time.perf_counter() - t_start
+            eta = elapsed * (1.0 - frac) / frac if frac > 0 else 0.0
+            bar_len = 30
+            filled = int(bar_len * frac)
+            bar = '#' * filled + '-' * (bar_len - filled)
+            sys.stdout.write(f"\r  [{bar}] {100*frac:6.2f}%  "
+                             f"iter {i+1}/{len(tw_arr)}  "
+                             f"elapsed {elapsed:6.1f}s  ETA {eta:6.1f}s")
+            sys.stdout.flush()
+
+    if show_progress:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
     return np.array(pc_list)

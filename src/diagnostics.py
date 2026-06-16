@@ -28,7 +28,7 @@ from turnpike import solve_incomplete_turnpike
 def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
                          ramp_time, dt, egvals_midpoint, w_noise=False,
                          t1_rates=None, t2_rates=None, initial_state=None,
-                         assym_list=None, down_assym_list=None):
+                         up_assym_list=None, down_assym_list=None):
     """
     Full diagnostic pipeline:
       1. FFT analysis -> frequencies, phases
@@ -118,7 +118,7 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
 
     # 6. Validate against exact state vector
     validation_exp = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, 0, dt,
-                                    assymetry_factors=assym_list,
+                                    up_assymetry_factors=up_assym_list,
                                     down_assymetry_factors=down_assym_list,
                                     initial_state=initial_state)
     target_H = validation_exp.H_numpy(validation_exp.tr)
