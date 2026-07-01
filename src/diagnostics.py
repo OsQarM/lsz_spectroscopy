@@ -44,10 +44,17 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
     results = {}
 
     # 1. Fourier analysis try hann, blackmanharris, boxcar
-    experimental_freqs, experimental_phases = fourier_analysis_iterative(
+    # experimental_freqs, experimental_phases = fourier_analysis_iterative(
+    #     pc_list, tw_l,
+    #     n_peaks=(2**nqubits) * (2**nqubits - 1) // 2 +1,
+    #     prominence_threshold=0.001, zero_pad_factor=32, window='hann', verbose=True
+    # )
+
+    experimental_freqs, experimental_phases = fourier_analysis(
         pc_list, tw_l,
         n_peaks=(2**nqubits) * (2**nqubits - 1) // 2,
-        prominence_threshold=0.001, zero_pad_factor=32, window='hann', verbose=True
+        prominence_threshold=0.001, zero_pad_factor=32, window='hann', 
+        detect_prominence=0.001, f_min=0.1
     )
 
     # 2. Global fit

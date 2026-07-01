@@ -3,10 +3,32 @@ import matplotlib.pyplot as plt
 
 
 def fourier_analysis(pc_list, tw_l, n_peaks=28, prominence_threshold=0.01,
-                     zero_pad_factor=32, window='hann'):
+                     zero_pad_factor=32, window='hann',
+                     min_freq_separation=None, detect_prominence=0.02,
+                     f_min=None):
     """
     High-resolution spectral analysis returning frequencies and phases of all
     detected modes. Amplitudes and decay rates are left for fit_decay_rates.
+
+    `min_freq_separation` sets an exclusion zone (in frequency units) around
+    every accepted peak: weaker candidates that fall within this window of an
+    already-accepted, stronger peak are rejected. This suppresses the small
+    spurious peaks that live in the spectral-leakage skirts ("envelope") of a
+    strong mode. If None, it defaults to ~1.5 raw FFT bins, which is the true
+    resolution limit of the (un-padded) transform — peaks closer than that
+    cannot be physically distinct.
+
+    `detect_prominence` is the prominence floor handed to `find_peaks`, as a
+    fraction of the spectrum's max magnitude. This is the FIRST gate a peak must
+    survive, so it sets the true sensitivity to faint peaks. Lower it (e.g.
+    0.002 or 0.0) to detect smaller peaks; `prominence_threshold` cannot recover
+    peaks that this gate has already rejected.
+
+    `f_min` ignores the low-frequency part of the spectrum for ANALYSIS only:
+    any peak below this frequency is excluded from detection, so the near-zero
+    peaks and their envelope are not analysed. The spectrum itself is left fully
+    intact and the plot still shows the complete, unmodified spectrum. If None,
+    the whole frequency range is analysed.
     """
     from scipy.signal import find_peaks, get_window
 
@@ -15,6 +37,12 @@ def fourier_analysis(pc_list, tw_l, n_peaks=28, prominence_threshold=0.01,
     N = len(y)
     dt = t[1] - t[0]
     dc = y.mean()
+
+    if min_freq_separation is None:
+        # The genuine frequency resolution is 1/(N*dt) regardless of how much
+        # we zero-pad; use a small multiple as the minimum spacing between
+        # physically distinct modes.
+        min_freq_separation = 3 / (N * dt)
 
     win = get_window(window, N)
     cg = win.sum() / N
@@ -30,15 +58,38 @@ def fourier_analysis(pc_list, tw_l, n_peaks=28, prominence_threshold=0.01,
     spc = spectrum[1:]
 
     min_dist = max(1, zero_pad_factor // 2)
-    peak_locs, _ = find_peaks(mag, distance=min_dist, prominence=0.02 * mag.max())
+    peak_locs, _ = find_peaks(mag, distance=min_dist,
+                              prominence=detect_prominence * mag.max())
     if len(peak_locs) == 0:
         peak_locs = np.array([np.argmax(mag)])
+
+    # Frequency cutoff for ANALYSIS only: drop any detected peak below f_min so
+    # the near-zero peaks / their envelope are ignored. The spectrum (mag/frq)
+    # is untouched, so the plot still shows the full, unmodified spectrum.
+    if f_min is not None:
+        peak_locs = peak_locs[frq[peak_locs] >= f_min]
+        if len(peak_locs) == 0:
+            peak_locs = np.array([np.argmax(mag[frq >= f_min]) + np.searchsorted(frq, f_min)])
 
     threshold = prominence_threshold * mag[peak_locs].max()
     peak_locs = peak_locs[mag[peak_locs] >= threshold]
 
+    # Greedy selection with an exclusion zone: walk candidates strongest-first
+    # and accept a peak only if no already-accepted (stronger) peak sits within
+    # `min_freq_separation` of it. This discards the small spurious peaks in the
+    # leakage skirts around each strong mode.
     order = np.argsort(mag[peak_locs])[::-1]
-    peak_locs = peak_locs[order[:n_peaks]]
+    accepted = []
+    accepted_freqs = []
+    for k in peak_locs[order]:
+        if len(accepted) >= n_peaks:
+            break
+        f_k = frq[k]
+        if accepted_freqs and np.min(np.abs(np.array(accepted_freqs) - f_k)) < min_freq_separation:
+            continue
+        accepted.append(k)
+        accepted_freqs.append(f_k)
+    peak_locs = np.array(accepted)
 
     log_mag = np.log(mag + 1e-30)
     freqs_refined = np.empty(len(peak_locs))
@@ -64,6 +115,18 @@ def fourier_analysis(pc_list, tw_l, n_peaks=28, prominence_threshold=0.01,
 
         phase_raw = np.angle(spc[k])
         phases[i] = (phase_raw - 2 * np.pi * freqs_refined[i] * t[0]) % (2 * np.pi)
+
+    # If we detected the full requested number of peaks, one of them may be a
+    # spurious zero-frequency (DC residual) peak. Discard the lowest-frequency
+    # peak so we keep the n_peaks-1 genuine modes. If fewer than n_peaks were
+    # found, assume no spurious peak and keep them all. When f_min is set the
+    # low-frequency junk is already excluded, so this discard would only drop a
+    # genuine mode — skip it.
+    if f_min is None and len(freqs_refined) >= n_peaks:
+        keep = np.argsort(freqs_refined)[1:]
+        freqs_refined = freqs_refined[keep]
+        phases = phases[keep]
+        amplitudes_fft = amplitudes_fft[keep]
 
     order2 = np.argsort(amplitudes_fft)[::-1]
     freqs_refined = freqs_refined[order2]
@@ -249,11 +312,24 @@ def fourier_analysis_iterative(pc_list, tw_l, n_peaks=28,
     freqs_out = np.array(collected_freqs)
     phases_out = np.array(collected_phases)
     amps_out = np.array(collected_amps)
+    lambdas_out = np.array(collected_lambdas)
+
+    # If we collected the full requested number of peaks, one of them may be a
+    # spurious zero-frequency (DC residual) peak. Discard the lowest-frequency
+    # peak so we keep the n_peaks-1 genuine modes. If fewer than n_peaks were
+    # found, assume no spurious peak and keep them all. (Mirrors fourier_analysis.)
+    if len(freqs_out) >= n_peaks:
+        keep = np.argsort(freqs_out)[1:]
+        freqs_out = freqs_out[keep]
+        phases_out = phases_out[keep]
+        amps_out = amps_out[keep]
+        lambdas_out = lambdas_out[keep]
 
     order = np.argsort(amps_out)[::-1]
     freqs_out = freqs_out[order]
     phases_out = phases_out[order]
     amps_out = amps_out[order]
+    lambdas_out = lambdas_out[order]
 
     # Plot: original spectrum with all collected peaks marked.
     x_max = (freqs_out.max() * 1.2) if len(freqs_out) else frq_axis[-1]
@@ -285,7 +361,7 @@ def fourier_analysis_iterative(pc_list, tw_l, n_peaks=28,
     print(f"\n{'#':>3}  {'Frequency':>14}  {'Phase (rad)':>12}  {'Amp':>10}  {'Lambda':>10}")
     print("-" * 60)
     for i, (f, p, A, lam) in enumerate(zip(freqs_out, phases_out, amps_out,
-                                           np.array(collected_lambdas)[order])):
+                                           lambdas_out)):
         print(f"{i+1:>3}  {f:>14.6f}  {p:>12.4f}  {A:>10.5f}  {lam:>10.5f}")
 
     return freqs_out, phases_out

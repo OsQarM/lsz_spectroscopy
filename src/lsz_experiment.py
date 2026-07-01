@@ -24,7 +24,8 @@ class LSZ_experiment():
     def __init__(self, n_qubits, epsilon, H_target_dictionary, ramp_time, wait_time, dt, up_assymetry_factors = None,
                  down_assymetry_factors=None,
                  ramp_noise=False, wait_noise=False, gamma_dec_list=None, gamma_dep_list=None,
-                 initial_state=None, ramp_error = 0.0, wait_error = 0.0, rng=None):
+                 initial_state=None, ramp_error = 0.0, wait_error = 0.0, rng=None,
+                 noise_seed=None):
         '''
         Params:
         n_qubits: number of qubits
@@ -78,7 +79,14 @@ class LSZ_experiment():
         self.ramp_e = ramp_error
         self.wait_e = wait_error
 
-        if rng is None:
+        # If `noise_seed` is given, this experiment re-seeds its own generator
+        # from that fixed value, so the drawn noise grid is identical every time
+        # the class is instantiated with the same seed (e.g. across a sweep,
+        # giving the same schedule error at every wait time). `noise_seed` takes
+        # precedence over `rng`.
+        if noise_seed is not None:
+            rng = np.random.default_rng(noise_seed)
+        elif rng is None:
             rng = _GLOBAL_RNG
         elif not isinstance(rng, np.random.Generator):
             rng = np.random.default_rng(rng)
@@ -246,13 +254,26 @@ class LSZ_experiment():
         return dep_ops, dec_ops
 
     def trapezoid(self, t, up_assym=1, down_assym=1, qubit_idx=None):
-        # Bin lookup. Clipped so values at t == tf land in the last valid bin.
-        bin_idx = int(np.clip(t / self.dt, 0, self.ramp_noise_grid.shape[0] - 1))
+        # Linearly interpolate the noise between adjacent bins. A piecewise-
+        # constant lookup (one flat value per dt-bin) makes H(t) a staircase
+        # with a jump at every bin boundary; qutip's adaptive ODE solver then
+        # rejects and shrinks its step at each discontinuity, thrashing down to
+        # sub-dt steps. Interpolating keeps H(t) continuous (same random samples,
+        # just connected) so the solver takes large steps again.
+        n_bins = self.ramp_noise_grid.shape[0]
+        x = np.clip(t / self.dt, 0, n_bins - 1)
+        lo = int(np.floor(x))
+        hi = min(lo + 1, n_bins - 1)
+        frac = x - lo
 
         #Generate errors
         if qubit_idx is not None:
-            slope_offset = self.ramp_e * self.ramp_noise_grid[bin_idx, qubit_idx]
-            cap = 1.0 + self.wait_e * self.wait_noise_grid[bin_idx, qubit_idx]
+            r_lo = self.ramp_noise_grid[lo, qubit_idx]
+            r_hi = self.ramp_noise_grid[hi, qubit_idx]
+            w_lo = self.wait_noise_grid[lo, qubit_idx]
+            w_hi = self.wait_noise_grid[hi, qubit_idx]
+            slope_offset = self.ramp_e * (r_lo + frac * (r_hi - r_lo))
+            cap = 1.0 + self.wait_e * (w_lo + frac * (w_hi - w_lo))
         else:
             slope_offset = 0.0
             cap = 1.0
@@ -341,21 +362,23 @@ class LSZ_experiment():
         ramp_c_ops = dep_ops + dec_ops if self.rnoise else []
         wait_c_ops = dep_ops + dec_ops if self.wnoise else []
 
+        # Once any earlier segment is solved with mesolve its output is a
+        # density matrix, which sesolve cannot accept. So a segment must use
+        # mesolve if it has its own noise OR if any preceding segment did.
         if self.rnoise:
             sim_r1 = qt.mesolve(H, psi0, t_list_r1, c_ops=ramp_c_ops)
         else:
             sim_r1 = qt.sesolve(H, psi0, t_list_r1)
 
-        if self.wnoise:
+        upstream_noisy = self.rnoise
+        if self.wnoise or upstream_noisy:
             sim_w = qt.mesolve(H, sim_r1.states[-1], t_list_w, c_ops=wait_c_ops)
         else:
             sim_w = qt.sesolve(H, sim_r1.states[-1], t_list_w)
 
-        downstream_noisy = self.wnoise or self.rnoise
-        if self.rnoise:
+        upstream_noisy = self.rnoise or self.wnoise
+        if self.rnoise or upstream_noisy:
             sim_r2 = qt.mesolve(H, sim_w.states[-1], t_list_r2, c_ops=ramp_c_ops)
-        elif downstream_noisy:
-            sim_r2 = qt.mesolve(H, sim_w.states[-1], t_list_r2, c_ops=[])
         else:
             sim_r2 = qt.sesolve(H, sim_w.states[-1], t_list_r2)
 
@@ -413,6 +436,7 @@ def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, u
                          r_noise=False, w_noise=False,
                          gamma_dec_list=None, gamma_dep_list=None, initial_state=None,
                          ramp_error=0.0, wait_error=0.0, rng=None,
+                         noise_seed=None,
                          show_progress=True):
     """Run LSZ experiment over a list of wait times, returning P(ground) vs tw.
 
@@ -420,6 +444,11 @@ def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, u
     wait-plateau amplitude. Each experiment instance draws its own realization
     from the module-level RNG (call `set_global_seed(seed)` once before the
     sweep for reproducibility) or from a user-supplied `rng`.
+
+    Pass `noise_seed` (any fixed int) to hold the schedule error *identical*
+    across every wait time in the sweep: each experiment re-seeds its own
+    generator from that value, so the same noise grid is drawn every iteration.
+    `noise_seed` takes precedence over `rng`.
 
     Progress is reported weighted by each run's total simulated time
     (2*ramp_time + tw), not by iteration count, so the percentage tracks
@@ -444,7 +473,8 @@ def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, u
                                     ramp_noise=r_noise, wait_noise=w_noise,
                                     gamma_dec_list=gamma_dec_list, gamma_dep_list=gamma_dep_list,
                                     initial_state=initial_state,
-                                    ramp_error=ramp_error, wait_error=wait_error, rng=rng)
+                                    ramp_error=ramp_error, wait_error=wait_error, rng=rng,
+                                    noise_seed=noise_seed)
         _, _, ramp_2_sim = experiment.time_evolution()
 
         #Population of GS of H0

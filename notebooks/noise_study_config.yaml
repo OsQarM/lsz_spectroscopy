@@ -1,0 +1,35 @@
+protocol:
+  epsilon: 1
+  max_wait_time: 100
+  ramp_time: 1
+  n_steps: 201
+  dt: 0.1
+hamiltonian:
+  local_z:
+  - 1
+  - 1
+  local_x:
+  - 1
+  - 1
+  two_body:
+  - 1
+decoherence:
+  t1_rates:
+  - 0.011
+  - 0.009
+  t2_rates:
+  - 0.008
+  - 0.011
+ramps:
+  up_assymetry_coefficients:
+  - 10
+  - 1
+  down_assymetry_coefficients:
+  - 10
+  - 1
+  average_ramp_error: 0.0
+  average_wait_error: 0.0
+initial_state:
+  preset: minus
+run:
+  noise_seed: 0
