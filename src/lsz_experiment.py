@@ -21,10 +21,11 @@ def set_global_seed(seed):
 
 class LSZ_experiment():
 
-    def __init__(self, n_qubits, epsilon, H_target_dictionary, ramp_time, wait_time, dt, up_assymetry_factors = None,
-                 down_assymetry_factors=None,
+    def __init__(self, n_qubits, epsilon, H_target_dictionary, ramp_time, wait_time, dt, up_z_assymetry_factors = None,
+                 down_z_assymetry_factors=None,
+                 up_x_assymetry_factors=None, down_x_assymetry_factors=None,
                  ramp_noise=False, wait_noise=False, gamma_dec_list=None, gamma_dep_list=None,
-                 initial_state=None, ramp_error = 0.0, wait_error = 0.0, rng=None,
+                 initial_state=None, ramp_error = 0.0, wait_error = 0.0, ramp_bias = 0.0, rng=None,
                  noise_seed=None):
         '''
         Params:
@@ -37,7 +38,11 @@ class LSZ_experiment():
         ramp_time: time taken to ramp up
         wait_time: Waiting time in the middle of the LSZ algorithm (0 if just doing LZ)
         dt: time step
-        assymetry_factors: list of relative ramp speeds for Z component of qubits
+        up_z_assymetry_factors / down_z_assymetry_factors: list of relative ramp
+            speeds for the local Z component of each qubit (up/down ramp).
+        up_x_assymetry_factors / down_x_assymetry_factors: list of relative ramp
+            speeds for the local X component of each qubit (up/down ramp),
+            applied independently of the Z asymmetry.
         initial_state: qutip ket used to initialize the time evolution and the diagnostics.
             If None, defaults to the tensor product of |-> states.
         '''
@@ -62,22 +67,37 @@ class LSZ_experiment():
         self.dec_rates = gamma_dec_list
         self.dep_rates = gamma_dep_list
 
-        #Ramp asymetry
-        if up_assymetry_factors == None:
-            self.up_assymetry_list = np.ones(n_qubits)
+        #Ramp asymetry (Z terms)
+        if up_z_assymetry_factors is None:
+            self.up_z_assymetry_list = np.ones(n_qubits)
         else:
-            self.up_assymetry_list = up_assymetry_factors
+            self.up_z_assymetry_list = up_z_assymetry_factors
 
-        if down_assymetry_factors is None:
-            self.down_assymetry_list = np.ones(n_qubits)
+        if down_z_assymetry_factors is None:
+            self.down_z_assymetry_list = np.ones(n_qubits)
         else:
-            self.down_assymetry_list = down_assymetry_factors
+            self.down_z_assymetry_list = down_z_assymetry_factors
+
+        #Ramp asymetry (X terms), applied independently of the Z asymmetry
+        if up_x_assymetry_factors is None:
+            self.up_x_assymetry_list = np.ones(n_qubits)
+        else:
+            self.up_x_assymetry_list = up_x_assymetry_factors
+
+        if down_x_assymetry_factors is None:
+            self.down_x_assymetry_list = np.ones(n_qubits)
+        else:
+            self.down_x_assymetry_list = down_x_assymetry_factors
 
         #Random ramp/wait errors. Each LSZ_experiment instance pre-draws its
         #own Gaussian noise grid so that H(t) stays a deterministic function
         #for qutip's ODE solver (different bin -> different sample).
         self.ramp_e = ramp_error
         self.wait_e = wait_error
+        # Mean of the ramp-noise samples. 0.0 -> symmetric Gaussian (unbiased);
+        # a positive value shifts the distribution so the average slope error is
+        # positive (mean error = ramp_error * ramp_bias).
+        self.ramp_bias = ramp_bias
 
         # If `noise_seed` is given, this experiment re-seeds its own generator
         # from that fixed value, so the drawn noise grid is identical every time
@@ -91,19 +111,41 @@ class LSZ_experiment():
         elif not isinstance(rng, np.random.Generator):
             rng = np.random.default_rng(rng)
 
-        # Per-qubit sample per dt-bin for the slope multiplier and the
-        # wait-plateau amplitude. We over-allocate by one bin so the lookup
-        # at t == tf lands safely in range.
-        n_bins_total = int(np.ceil(self.tf / self.dt)) + 1
+        # Number of independent noise bins. The resolution is decoupled from dt:
+        # each ramp gets `max(100, int(ramp_time/dt))` bins and the wait gets
+        # `max(100, int(wait_time/dt))`, matching the time-evolution grids in
+        # time_evolution(). This guarantees at least 100 noise samples per ramp
+        # even when ramp_time/dt < 100 (previously the grid was one sample per
+        # dt-bin, so a coarse dt gave fewer than 100 samples per ramp). The
+        # lookup in trapezoid() maps t onto the segment it falls in. We
+        # over-allocate by one bin so the lookup at a segment's upper edge lands
+        # safely in range. X and Z fields get *independent* realizations.
+        self.n_bins_r = max(100, int(self.tr / self.dt))
+        self.n_bins_w = max(100, int(self.tw / self.dt))
+        # ramp1 bins, wait bins, ramp2 bins, +1 guard
+        n_bins_total = self.n_bins_r + self.n_bins_w + self.n_bins_r + 1
         if self.ramp_e > 0:
-            self.ramp_noise_grid = rng.standard_normal((n_bins_total, n_qubits))
+            self.ramp_noise_grid_z = rng.standard_normal((n_bins_total, n_qubits)) + self.ramp_bias
+            self.ramp_noise_grid_x = rng.standard_normal((n_bins_total, n_qubits)) + self.ramp_bias
+
+            #Comment if errors desired everywhere
+            # Restrict ramp noise to qubit 1's Z component only: zero the X
+            # ramp noise entirely and every Z column except qubit index 1.
+            self.ramp_noise_grid_x[:] = 0.0
+            keep = 1
+            mask = np.ones(n_qubits, dtype=bool)
+            mask[keep] = False
+            self.ramp_noise_grid_z[:, mask] = 0.0
         else:
-            self.ramp_noise_grid = np.zeros((n_bins_total, n_qubits))
+            self.ramp_noise_grid_z = np.zeros((n_bins_total, n_qubits))
+            self.ramp_noise_grid_x = np.zeros((n_bins_total, n_qubits))
 
         if self.wait_e > 0:
-            self.wait_noise_grid = rng.standard_normal((n_bins_total, n_qubits))
+            self.wait_noise_grid_z = rng.standard_normal((n_bins_total, n_qubits))
+            self.wait_noise_grid_x = rng.standard_normal((n_bins_total, n_qubits))
         else:
-            self.wait_noise_grid = np.zeros((n_bins_total, n_qubits))
+            self.wait_noise_grid_z = np.zeros((n_bins_total, n_qubits))
+            self.wait_noise_grid_x = np.zeros((n_bins_total, n_qubits))
 
 
         #Initialize operators
@@ -125,6 +167,9 @@ class LSZ_experiment():
         
         self.Hz_numpy_list = self.build_Hz_numpy_list()
         self.Hz_qutip_list = self.build_Hz_qutip_list()
+
+        self.Hx_numpy_list = self.build_Hx_numpy_list()
+        self.Hx_qutip_list = self.build_Hx_qutip_list()
 
         #Create noise operators
         self.dep_ops, self.dec_ops = None, None
@@ -156,6 +201,9 @@ class LSZ_experiment():
         return H
 
     def build_Ht_numpy_common(self):
+        # Only the ZZ couplings stay in the "common" (unasymmetric) schedule.
+        # The local X fields are pulled into their own per-qubit list so they
+        # can carry an independent X ramp asymmetry (see build_Hx_numpy_list).
         H = np.zeros((2**self.n_qubits, 2**self.n_qubits), dtype=complex)
 
         if self.n_qubits > 1:
@@ -165,10 +213,6 @@ class LSZ_experiment():
                 for j in range(i+1, self.n_qubits):
                     H += zz_terms[k] * self.npsz_list[i] @ self.npsz_list[j]
                     k += 1
-
-        local_x_terms = self.Ht_dict.get('local_x', np.zeros(self.n_qubits))
-        for i, weight in enumerate(local_x_terms):
-            H += weight * self.npsx_list[i]
 
         return H
 
@@ -182,12 +226,26 @@ class LSZ_experiment():
                     H += zz_terms[k] * self.qtsz_list[i] * self.qtsz_list[j]
                     k += 1
 
+        return H
+
+    def build_Hx_numpy_list(self):
+        H_list = []
+
         local_x_terms = self.Ht_dict.get('local_x', np.zeros(self.n_qubits))
         for i, weight in enumerate(local_x_terms):
-            H += weight * self.qtsx_list[i]
+            H_list.append(weight * self.npsx_list[i])
 
-        return H
-    
+        return H_list
+
+    def build_Hx_qutip_list(self):
+        H_list = []
+
+        local_x_terms = self.Ht_dict.get('local_x', np.zeros(self.n_qubits))
+        for i, weight in enumerate(local_x_terms):
+            H_list.append(weight * self.qtsx_list[i])
+
+        return H_list
+
     def build_Hz_numpy_list(self):
         H_list = []
 
@@ -253,25 +311,49 @@ class LSZ_experiment():
 
         return dep_ops, dec_ops
 
-    def trapezoid(self, t, up_assym=1, down_assym=1, qubit_idx=None):
+    def trapezoid(self, t, up_assym=1, down_assym=1, qubit_idx=None, term='z'):
         # Linearly interpolate the noise between adjacent bins. A piecewise-
         # constant lookup (one flat value per dt-bin) makes H(t) a staircase
         # with a jump at every bin boundary; qutip's adaptive ODE solver then
         # rejects and shrinks its step at each discontinuity, thrashing down to
         # sub-dt steps. Interpolating keeps H(t) continuous (same random samples,
         # just connected) so the solver takes large steps again.
-        n_bins = self.ramp_noise_grid.shape[0]
-        x = np.clip(t / self.dt, 0, n_bins - 1)
+        #
+        # `term` selects which (independent) noise realization to read: 'z' for
+        # the local Z fields, 'x' for the local X fields. The common (H0/Hzz)
+        # schedule passes qubit_idx=None and carries no noise.
+        ramp_grid = self.ramp_noise_grid_x if term == 'x' else self.ramp_noise_grid_z
+        wait_grid = self.wait_noise_grid_x if term == 'x' else self.wait_noise_grid_z
+
+        # Map t to a continuous bin coordinate on the per-segment fixed-
+        # resolution grid (see __init__). Each segment spans its own block of
+        # bins so the number of noise samples per ramp is max(100, ramp/dt),
+        # independent of dt.
+        n_bins = ramp_grid.shape[0]
+        nr, nw = self.n_bins_r, self.n_bins_w
+        if t <= self.tr:
+            # ramp1: [to, tr] -> bins [0, nr]
+            frac_seg = (t - self.to) / (self.tr - self.to) if self.tr > self.to else 0.0
+            x = frac_seg * nr
+        elif t <= self.tr + self.tw:
+            # wait: [tr, tr+tw] -> bins [nr, nr+nw]
+            frac_seg = (t - self.tr) / self.tw if self.tw > 0 else 0.0
+            x = nr + frac_seg * nw
+        else:
+            # ramp2: [tr+tw, tf] -> bins [nr+nw, nr+nw+nr]
+            frac_seg = (t - self.tr - self.tw) / (self.tf - self.tr - self.tw)
+            x = nr + nw + frac_seg * nr
+        x = np.clip(x, 0, n_bins - 1)
         lo = int(np.floor(x))
         hi = min(lo + 1, n_bins - 1)
         frac = x - lo
 
         #Generate errors
         if qubit_idx is not None:
-            r_lo = self.ramp_noise_grid[lo, qubit_idx]
-            r_hi = self.ramp_noise_grid[hi, qubit_idx]
-            w_lo = self.wait_noise_grid[lo, qubit_idx]
-            w_hi = self.wait_noise_grid[hi, qubit_idx]
+            r_lo = ramp_grid[lo, qubit_idx]
+            r_hi = ramp_grid[hi, qubit_idx]
+            w_lo = wait_grid[lo, qubit_idx]
+            w_hi = wait_grid[hi, qubit_idx]
             slope_offset = self.ramp_e * (r_lo + frac * (r_hi - r_lo))
             cap = 1.0 + self.wait_e * (w_lo + frac * (w_hi - w_lo))
         else:
@@ -296,7 +378,8 @@ class LSZ_experiment():
             return np.minimum(1.0, up_assym * self.slope * t) + slope_offset
         else:
             return np.minimum(1.0, down_assym * self.slope * (self.tf - t)) + slope_offset
-    
+        
+
     # def trapezoid(self, t, assym=1):
     #     return np.minimum(1, assym*self.slope * np.minimum(t, self.tf - t))
 
@@ -306,9 +389,10 @@ class LSZ_experiment():
         H = (1-s)*self.H0_numpy + s*self.Ht_numpy_common
         #Add local Z fields with assymetries (per-qubit wait-plateau noise)
         for i, Hi in enumerate(self.Hz_numpy_list):
-            H += self.trapezoid(t, up_assym=self.up_assymetry_list[i],
-                                down_assym=self.down_assymetry_list[i],
-                                qubit_idx=i) * Hi
+            H += self.z_schedule(t, i) * Hi
+        #Add local X fields with their own (independent) assymetries and noise
+        for i, Hi in enumerate(self.Hx_numpy_list):
+            H += self.x_schedule(t, i) * Hi
         return H
 
     def H_qutip(self):
@@ -316,23 +400,94 @@ class LSZ_experiment():
         H = [[self.H0_qutip, lambda t: 1 - self.trapezoid(t)],
             [self.Ht_qutip_common, lambda t: self.trapezoid(t)]]
         #Add local Z fields with assymetries (per-qubit wait-plateau noise)
-        H += [[Hi, lambda t, i=i: self.trapezoid(t,
-                                                 up_assym=self.up_assymetry_list[i],
-                                                 down_assym=self.down_assymetry_list[i],
-                                                 qubit_idx=i)]
+        H += [[Hi, lambda t, i=i: self.z_schedule(t, i)]
             for i, Hi in enumerate(self.Hz_qutip_list)]
+        #Add local X fields with their own (independent) assymetries and noise
+        H += [[Hi, lambda t, i=i: self.x_schedule(t, i)]
+            for i, Hi in enumerate(self.Hx_qutip_list)]
         return H
+
+    def z_schedule(self, t, qubit_idx):
+        """Scheduling function s(t) applied to qubit `qubit_idx`'s local Z field."""
+        return self.trapezoid(t, up_assym=self.up_z_assymetry_list[qubit_idx],
+                              down_assym=self.down_z_assymetry_list[qubit_idx],
+                              qubit_idx=qubit_idx, term='z')
+
+    def x_schedule(self, t, qubit_idx):
+        """Scheduling function s(t) applied to qubit `qubit_idx`'s local X field.
+
+        Uses an independent noise realization from the Z fields (term='x')."""
+        return self.trapezoid(t, up_assym=self.up_x_assymetry_list[qubit_idx],
+                              down_assym=self.down_x_assymetry_list[qubit_idx],
+                              qubit_idx=qubit_idx, term='x')
+
+    def calculate_ramp_areas(self, n_steps=None):
+        """Signed area between the two qubits' ramps, per term (x, z) and per
+        schedule segment (ramp1, wait, ramp2).
+
+        The area is the integral over time of the difference between qubit 0's
+        schedule and qubit 1's schedule, i.e. sum over dt of (s_0(t) - s_1(t)).
+        With this convention a faster-ramping qubit 0 (its schedule reaches the
+        plateau earlier / sits higher during the up-ramp) yields a *positive*
+        area. Works for arbitrary ramp shapes since it is a direct numerical
+        integral of the sampled schedules.
+
+        Only defined for the two-qubit case (compares qubit 0 vs qubit 1).
+
+        Returns a nested dict:
+            {'x': {'ramp1': ..., 'wait': ..., 'ramp2': ..., 'total': ...},
+             'z': {'ramp1': ..., 'wait': ..., 'ramp2': ..., 'total': ...}}
+        """
+        if self.n_qubits < 2:
+            raise ValueError("Ramp area is only defined for >= 2 qubits "
+                             "(it compares qubit 0 against qubit 1).")
+
+        # Sample densely enough to resolve the ramps. Default to a dt-based grid.
+        if n_steps is None:
+            n_steps = max(1000, int(np.ceil(self.tf / self.dt)) + 1)
+
+        # Segment boundaries: ramp1 [0, tr], wait [tr, tr+tw], ramp2 [tr+tw, tf].
+        segments = {
+            'ramp1': (self.to, self.tr),
+            'wait': (self.tr, self.tr + self.tw),
+            'ramp2': (self.tr + self.tw, self.tf),
+        }
+        schedule_fns = {'x': self.x_schedule, 'z': self.z_schedule}
+
+        areas = {}
+        for term, sched in schedule_fns.items():
+            term_areas = {}
+            total = 0.0
+            for seg_name, (t_start, t_end) in segments.items():
+                if t_end <= t_start:
+                    term_areas[seg_name] = 0.0
+                    continue
+                t_seg = np.linspace(t_start, t_end, n_steps)
+                s0 = np.array([sched(t, 0) for t in t_seg])
+                s1 = np.array([sched(t, 1) for t in t_seg])
+                area = np.trapezoid(s0 - s1, t_seg)
+                term_areas[seg_name] = float(area)
+                total += area
+            term_areas['total'] = float(total)
+            areas[term] = term_areas
+
+        return areas
 
     def show_schedule(self, n_steps):
         t_list = np.linspace(self.to, self.tf, n_steps)
         common_schedule = np.array([self.trapezoid(t) for t in t_list])
         hz_schedules = [
-            np.array([self.trapezoid(t, up_assym=self.up_assymetry_list[i],
-                                     down_assym=self.down_assymetry_list[i],
-                                     qubit_idx=i) for t in t_list])
+            np.array([self.z_schedule(t, i) for t in t_list])
             for i in range(len(self.Hz_numpy_list))
         ]
-        return t_list, common_schedule, hz_schedules
+        hx_schedules = [
+            np.array([self.x_schedule(t, i) for t in t_list])
+            for i in range(len(self.Hx_numpy_list))
+        ]
+        ramp_areas = None
+        if self.n_qubits >= 2:
+            ramp_areas = self.calculate_ramp_areas()
+        return t_list, common_schedule, hz_schedules, hx_schedules, ramp_areas
 
 
     def show_spectrum(self, n_steps):
@@ -431,11 +586,12 @@ class LSZ_experiment():
         return pops
 
 
-def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, up_assym_list = None,
-                         down_assym_list=None,
+def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, up_z_assym_list = None,
+                         down_z_assym_list=None,
+                         up_x_assym_list=None, down_x_assym_list=None,
                          r_noise=False, w_noise=False,
                          gamma_dec_list=None, gamma_dep_list=None, initial_state=None,
-                         ramp_error=0.0, wait_error=0.0, rng=None,
+                         ramp_error=0.0, wait_error=0.0, ramp_bias=0.0, rng=None,
                          noise_seed=None,
                          show_progress=True):
     """Run LSZ experiment over a list of wait times, returning P(ground) vs tw.
@@ -468,12 +624,14 @@ def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, u
 
     pc_list = []
     for i, wait_time in enumerate(tw_arr):
-        experiment = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, float(wait_time), dt, up_assym_list,
-                                    down_assymetry_factors=down_assym_list,
+        experiment = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, float(wait_time), dt, up_z_assym_list,
+                                    down_z_assymetry_factors=down_z_assym_list,
+                                    up_x_assymetry_factors=up_x_assym_list,
+                                    down_x_assymetry_factors=down_x_assym_list,
                                     ramp_noise=r_noise, wait_noise=w_noise,
                                     gamma_dec_list=gamma_dec_list, gamma_dep_list=gamma_dep_list,
                                     initial_state=initial_state,
-                                    ramp_error=ramp_error, wait_error=wait_error, rng=rng,
+                                    ramp_error=ramp_error, wait_error=wait_error, ramp_bias=ramp_bias, rng=rng,
                                     noise_seed=noise_seed)
         _, _, ramp_2_sim = experiment.time_evolution()
 
@@ -509,3 +667,58 @@ def run_experiment_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt, u
         sys.stdout.write("\n")
         sys.stdout.flush()
     return np.array(pc_list)
+
+
+def run_averaged_sweep(nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt,
+                       n_averages, up_z_assym_list=None, down_z_assym_list=None,
+                       up_x_assym_list=None, down_x_assym_list=None,
+                       r_noise=False, w_noise=False,
+                       gamma_dec_list=None, gamma_dep_list=None, initial_state=None,
+                       ramp_error=0.0, wait_error=0.0, ramp_bias=0.0, seed_rng=None,
+                       show_progress=True, return_all=False):
+    """Average P(psi0) vs wait time over `n_averages` independent noise
+    realizations to smooth out schedule-error jitter in the signal.
+
+    Each repetition runs a *full* `run_experiment_sweep` with a distinct fixed
+    `noise_seed`, so within one sweep the schedule error is the same at every
+    wait time (no per-iteration jitter), but it differs between sweeps. The
+    per-sweep signals are then averaged pointwise.
+
+    The per-sweep seeds are drawn from `seed_rng` (an int, a Generator, or None
+    for a fresh nondeterministic generator); pass an int for a reproducible set
+    of realizations.
+
+    Returns the averaged pc array. If `return_all=True`, returns
+    (mean_pc, all_pc) where all_pc has shape (n_averages, len(tw_l)).
+    """
+    import sys
+
+    if not isinstance(seed_rng, np.random.Generator):
+        seed_rng = np.random.default_rng(seed_rng)
+
+    # Distinct seed per repetition. int32 range keeps them plainly reproducible.
+    seeds = seed_rng.integers(0, 2**31 - 1, size=n_averages)
+
+    all_pc = []
+    for rep, s in enumerate(seeds):
+        if show_progress:
+            sys.stdout.write(f"Realization {rep + 1}/{n_averages} (seed {int(s)})\n")
+            sys.stdout.flush()
+        pc = run_experiment_sweep(
+            nqubits, epsilon, H_target_dict, ramp_time, tw_l, dt,
+            up_z_assym_list=up_z_assym_list, down_z_assym_list=down_z_assym_list,
+            up_x_assym_list=up_x_assym_list, down_x_assym_list=down_x_assym_list,
+            r_noise=r_noise, w_noise=w_noise,
+            gamma_dec_list=gamma_dec_list, gamma_dep_list=gamma_dep_list,
+            initial_state=initial_state,
+            ramp_error=ramp_error, wait_error=wait_error, ramp_bias=ramp_bias,
+            noise_seed=int(s), show_progress=show_progress,
+        )
+        all_pc.append(pc)
+
+    all_pc = np.array(all_pc)
+    mean_pc = all_pc.mean(axis=0)
+
+    if return_all:
+        return mean_pc, all_pc
+    return mean_pc

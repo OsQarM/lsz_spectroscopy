@@ -1,5 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
+
+from plotting.diagnostic_plots import plot_decay_rates
 from itertools import combinations
 
 
@@ -87,14 +89,9 @@ def predict_dephasing_rates_exact(egvecs, gamma_dep_list, sz_list,
     return lambda_pred
 
 
-def plot_dephasing_comparison(lambdas_experimental, possible_lambdas):
-    """Scatter experimental lambdas with horizontal lines at predicted upper-bound rates."""
-    plt.figure(figsize=(7, 4))
-    plt.scatter(range(len(lambdas_experimental)), lambdas_experimental,
-                color='steelblue', zorder=3, label='experimental')
-    for i, rate in enumerate(possible_lambdas):
-        plt.axhline(rate, color='red', linestyle='--', lw=1.2,
-                    label='predicted (exact)' if i == 0 else None)
-    plt.legend(frameon=False)
-    plt.tight_layout()
-    plt.show()
+def plot_dephasing_comparison(lambdas_experimental, possible_lambdas, plots=True):
+    """Scatter experimental lambdas with horizontal lines at predicted rates."""
+    if not plots:
+        return
+    plot_decay_rates(lambdas_experimental, predicted_rates=possible_lambdas,
+                     ylabel=r"decay rate $\lambda_{mn}$", show=True)

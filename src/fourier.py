@@ -1,11 +1,17 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+from plotting.spectrum_plots import (
+    plot_spectrum_both_scales,
+    plot_mode_amplitudes,
+    plot_global_fit,
+)
+
 
 def fourier_analysis(pc_list, tw_l, n_peaks=28, prominence_threshold=0.01,
                      zero_pad_factor=32, window='hann',
                      min_freq_separation=None, detect_prominence=0.02,
-                     f_min=None):
+                     f_min=None, plots=True):
     """
     High-resolution spectral analysis returning frequencies and phases of all
     detected modes. Amplitudes and decay rates are left for fit_decay_rates.
@@ -134,29 +140,13 @@ def fourier_analysis(pc_list, tw_l, n_peaks=28, prominence_threshold=0.01,
     amplitudes_fft = amplitudes_fft[order2]
 
     x_max = freqs_refined.max() * 1.2
-    colors = plt.cm.tab10.colors
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-    ax = axes[0]
-    ax.plot(frq, mag, color='#cc4444', lw=1.2)
-    for i, f in enumerate(freqs_refined):
-        ax.axvline(f, color=colors[i % len(colors)], lw=1.0, linestyle='--', alpha=0.8)
-    ax.set_xlabel('Frequency')
-    ax.set_ylabel('|FFT|')
-    ax.set_xlim(0, x_max)
-    ax.set_title('Spectrum')
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1]
-    ax.bar(range(len(amplitudes_fft)), amplitudes_fft,
-           color=[colors[i % len(colors)] for i in range(len(amplitudes_fft))])
-    ax.set_xlabel('Mode index')
-    ax.set_ylabel('FFT Amplitude')
-    ax.set_title('Mode Amplitudes (FFT)')
-    ax.grid(True, alpha=0.3, axis='y')
-
-    plt.tight_layout()
-    plt.show()
+    if plots:
+        # Spectrum produced twice -- linear and log y -- as separate figures,
+        # and the mode amplitudes in a figure of their own.
+        plot_spectrum_both_scales(frq, mag, peak_freqs=freqs_refined,
+                                  x_max=x_max, show=True)
+        plot_mode_amplitudes(amplitudes_fft, ylabel='FFT amplitude', show=True)
 
     print(f"\n{'#':>3}  {'Frequency':>14}  {'Phase (rad)':>12}")
     print("-" * 35)
@@ -169,7 +159,8 @@ def fourier_analysis(pc_list, tw_l, n_peaks=28, prominence_threshold=0.01,
 def fourier_analysis_iterative(pc_list, tw_l, n_peaks=28,
                                prominence_threshold=0.01, zero_pad_factor=32,
                                window='hann', max_rounds=None,
-                               min_freq_separation=None, verbose=False):
+                               min_freq_separation=None, verbose=False,
+                               plots=True):
     """
     Iterative (CLEAN-style) spectral analysis.
 
@@ -333,30 +324,11 @@ def fourier_analysis_iterative(pc_list, tw_l, n_peaks=28,
 
     # Plot: original spectrum with all collected peaks marked.
     x_max = (freqs_out.max() * 1.2) if len(freqs_out) else frq_axis[-1]
-    colors = plt.cm.tab10.colors
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-    ax = axes[0]
-    ax.plot(frq_axis, mag_orig, color='#cc4444', lw=1.2, label='original')
-    for i, f in enumerate(freqs_out):
-        ax.axvline(f, color=colors[i % len(colors)], lw=1.0,
-                   linestyle='--', alpha=0.8)
-    ax.set_xlabel('Frequency')
-    ax.set_ylabel('|FFT|')
-    ax.set_xlim(0, x_max)
-    ax.set_title(f'Spectrum with {len(freqs_out)} iteratively recovered peaks')
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1]
-    ax.bar(range(len(amps_out)), amps_out,
-           color=[colors[i % len(colors)] for i in range(len(amps_out))])
-    ax.set_xlabel('Mode index (sorted by amplitude)')
-    ax.set_ylabel('Fitted amplitude')
-    ax.set_title('Mode Amplitudes (time-domain fit)')
-    ax.grid(True, alpha=0.3, axis='y')
-
-    plt.tight_layout()
-    plt.show()
+    if plots:
+        plot_spectrum_both_scales(frq_axis, mag_orig, peak_freqs=freqs_out,
+                                  x_max=x_max, show=True)
+        plot_mode_amplitudes(amps_out, ylabel='fitted amplitude', show=True)
 
     print(f"\n{'#':>3}  {'Frequency':>14}  {'Phase (rad)':>12}  {'Amp':>10}  {'Lambda':>10}")
     print("-" * 60)
@@ -367,7 +339,8 @@ def fourier_analysis_iterative(pc_list, tw_l, n_peaks=28,
     return freqs_out, phases_out
 
 
-def fit_decay_rates(pc_list, tw_l, freqs_detected, phases_detected, noise=True):
+def fit_decay_rates(pc_list, tw_l, freqs_detected, phases_detected, noise=True,
+                    plots=True):
     """
     Fit amplitudes (and optionally decay rates) and DC offset globally to:
 
@@ -426,14 +399,9 @@ def fit_decay_rates(pc_list, tw_l, freqs_detected, phases_detected, noise=True):
         lambdas = np.full(K, 1e-12)
         y_fit = model(t, *popt)
 
-    plt.figure(figsize=(8, 3))
-    plt.plot(t, y, 'b-', lw=1, alpha=0.6, label='data')
-    plt.plot(t, y_fit, 'r--', lw=1.5, label='fit')
     rms = np.sqrt(np.mean((y - y_fit)**2))
-    plt.title(f'Global fit  (RMS residual = {rms:.5f},  DC = {dc_fit:.4f})')
-    plt.xlabel('Time')
-    plt.legend(frameon=False)
-    plt.tight_layout()
-    plt.show()
+    print(f'Global fit: RMS residual = {rms:.5f},  DC = {dc_fit:.4f}')
+    if plots:
+        plot_global_fit(t, y, y_fit, rms=rms, dc=dc_fit, show=True)
 
     return amplitudes, lambdas, dc_fit

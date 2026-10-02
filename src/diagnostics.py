@@ -1,6 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+from plotting.diagnostic_plots import plot_estimate_vs_true
+from plotting.spectrum_plots import plot_spectrum_with_predictions
+
 from fourier import fourier_analysis,  fourier_analysis_iterative, fit_decay_rates
 from spectrum_matching import (
     compute_true_differences,
@@ -22,13 +25,15 @@ from dephasing import (
     plot_dephasing_comparison,
 )
 from lsz_experiment import LSZ_experiment
-from turnpike import solve_incomplete_turnpike
+from turnpike import solve_turnpike, solve_incomplete_turnpike
 
 
-def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
+def  run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
                          ramp_time, dt, egvals_midpoint, w_noise=False,
                          t1_rates=None, t2_rates=None, initial_state=None,
-                         up_assym_list=None, down_assym_list=None):
+                         up_z_assym_list=None, down_z_assym_list=None,
+                         up_x_assym_list=None, down_x_assym_list=None,
+                         plots=True):
     """
     Full diagnostic pipeline:
       1. FFT analysis -> frequencies, phases
@@ -54,15 +59,16 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
         pc_list, tw_l,
         n_peaks=(2**nqubits) * (2**nqubits - 1) // 2,
         prominence_threshold=0.001, zero_pad_factor=32, window='hann', 
-        detect_prominence=0.001, f_min=0.1
+        detect_prominence=0.001, f_min=0.001, plots=plots
     )
 
     # 2. Global fit
     experimental_amps, lambdas, dc_fit = fit_decay_rates(
-        pc_list, tw_l, experimental_freqs, experimental_phases, noise=w_noise
+        pc_list, tw_l, experimental_freqs, experimental_phases, noise=w_noise,
+        plots=plots
     )
 
-    print("Amplitudes:", experimental_amps)
+    print("Amplitudes:", experimental_amps, " Sum last three:", sum(experimental_amps[-3:]))
     print("Decay rates:", lambdas)
     print("DC (fitted):", dc_fit, "  DC (mean):", np.mean(pc_list))
 
@@ -82,7 +88,25 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
         experimental_energy_diffs, true_differences
     )
     table_printout(matched_detected, matched_true, residuals, true_differences, col_idx)
-    scatter_plot(matched_detected, matched_true, residuals)
+    scatter_plot(matched_detected, matched_true, residuals, plots=plots)
+
+    if plots:
+        # Recomputed with the same window/zero-padding as the fourier_analysis
+        # call above (hann, zero_pad_factor=32) so the axis lines up with
+        # `experimental_freqs`.
+        y = np.asarray(pc_list, dtype=float)
+        t = np.asarray(tw_l, dtype=float)
+        dt_fft = t[1] - t[0]
+        win = np.hanning(len(y))
+        spec = np.fft.rfft((y - y.mean()) * win, n=32 * len(y))
+        frq_full = np.fft.rfftfreq(32 * len(y), dt_fft)
+        true_freqs = true_differences / (2 * np.pi)
+        plot_spectrum_with_predictions(
+            frq_full[1:], np.abs(spec)[1:],
+            detected_freqs=experimental_freqs,
+            true_freqs=true_freqs,
+            show=True,
+        )
 
     results.update({
         'energy_diffs': experimental_energy_diffs,
@@ -92,7 +116,27 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
     })
 
     # 4. Turnpike spectrum reconstruction
-    solutions = solve_incomplete_turnpike(experimental_energy_diffs, n_levels=2**nqubits)
+    n_levels = 2 ** nqubits
+    n_expected_diffs = n_levels * (n_levels - 1) // 2
+    if len(experimental_energy_diffs) == n_expected_diffs:
+        # The exact solver needs a matching tolerance that reflects the real
+        # frequency-extraction error, not an arbitrary default: with peaks
+        # this closely spaced, FFT fitting error can exceed the 0.01 default
+        # by an order of magnitude, which makes every backtracking branch
+        # fail to match. Size slack off the worst observed residual from the
+        # true-difference matching above (a proxy for FFT peak-picking error),
+        # with a safety margin for levels not sampled by that residual set.
+        turnpike_slack = max(3 * np.max(np.abs(residuals)), 0.01)
+        levels = solve_turnpike(experimental_energy_diffs, slack=turnpike_slack)
+        solutions = {
+            'levels': levels,
+            'explained': n_expected_diffs,
+            'total': n_expected_diffs,
+            'score': 1.0,
+            'method': 'exact',
+        }
+    else:
+        solutions = solve_incomplete_turnpike(experimental_energy_diffs, n_levels=n_levels)
     experimental_energies, shifted_true_energies = compare_spectrum_to_turnpike(
         solutions, egvals_midpoint
     )
@@ -125,8 +169,10 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
 
     # 6. Validate against exact state vector
     validation_exp = LSZ_experiment(nqubits, epsilon, H_target_dict, ramp_time, 0, dt,
-                                    up_assymetry_factors=up_assym_list,
-                                    down_assymetry_factors=down_assym_list,
+                                    up_z_assymetry_factors=up_z_assym_list,
+                                    down_z_assymetry_factors=down_z_assym_list,
+                                    up_x_assymetry_factors=up_x_assym_list,
+                                    down_x_assymetry_factors=down_x_assym_list,
                                     initial_state=initial_state)
     target_H = validation_exp.H_numpy(validation_exp.tr)
     u_exact_amplitudes, u_exact_phases_rel, egvals_t, egvecs_t = validate_state_vector(
@@ -136,25 +182,16 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
     print("Exact |u_m|:", u_exact_amplitudes)
     print("Exact phases (mod pi, rel to u_0):", u_exact_phases_rel)
 
-    # u_m scatter
-    plt.figure()
-    plt.scatter(np.sort(u_m), np.sort(u_exact_amplitudes))
-    diag = np.linspace(np.min(u_m), np.max(u_m), 100)
-    plt.plot(diag, diag, "--", c="red", label="true = estimate")
-    plt.xlabel("estimated u_m")
-    plt.ylabel("true u_m")
-    plt.legend(frameon=False)
-    plt.show()
-
-    # phi_m scatter
-    plt.figure()
-    plt.scatter(np.sort(phi_m), np.sort(u_exact_phases_rel))
-    diag = np.linspace(np.min(phi_m), np.max(phi_m), 100)
-    plt.plot(diag, diag, "--", c="red", label="true = estimate")
-    plt.xlabel("estimated phi_m")
-    plt.ylabel("true phi_m")
-    plt.legend(frameon=False)
-    plt.show()
+    # u_m and phi_m: estimated vs true, with the red dashed identity line.
+    if plots:
+        plot_estimate_vs_true(np.sort(u_exact_amplitudes), np.sort(u_m),
+                              xlabel=r"true $|u_m|$",
+                              ylabel=r"estimated $|\tilde{u}_m|$",
+                              show=True)
+        plot_estimate_vs_true(np.sort(u_exact_phases_rel), np.sort(phi_m),
+                              xlabel=r"true $\phi_m$",
+                              ylabel=r"estimated $\tilde{\phi}_m$",
+                              show=True)
 
     results.update({
         'u_exact_amplitudes': u_exact_amplitudes,
@@ -166,7 +203,7 @@ def run_full_diagnostics(pc_list, tw_l, nqubits, epsilon, H_target_dict,
     if t2_rates is not None:
         possible_lambdas = calculate_dephasing_rates_upper_bound(t2_rates)
         exact_lambdas = predict_gamma_rates(t1_rates, t2_rates)
-        plot_dephasing_comparison(lambdas, exact_lambdas)
+        plot_dephasing_comparison(lambdas, exact_lambdas, plots=plots)
         print("Exact lambdas (predicted):", exact_lambdas)
         print("Experimental lambdas:", lambdas)
 
