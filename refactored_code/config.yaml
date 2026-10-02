@@ -1,0 +1,161 @@
+# =============================================================================
+# LZS spectroscopy pipeline -- single configuration file for all three scripts
+# =============================================================================
+#
+#   01_run_sweep.py        pre-simulation diagnostics + the wait-time sweep
+#   02_run_diagnostics.py  full diagnostics on a stored pc_list
+#   03_run_asymmetry.py    amplitude vs. ramp-asymmetry sweep
+#
+# `common` holds the physics every script shares. The three script-specific
+# blocks below hold only what that script adds.
+#
+# Script 2 prefers the physics recorded in its input run's metadata.yaml and
+# falls back to `common` here for anything the metadata does not carry, so you
+# can analyse an old run with new diagnostics settings without disturbing the
+# parameters it was actually produced with.
+#
+# Any key omitted here falls back to the defaults in lzs_pipeline/config.py.
+# =============================================================================
+
+common:
+
+  protocol:
+    epsilon: 1.0            # coefficient of the transverse (X) Hamiltonian
+    max_wait_time: 315.0    # longest wait time in the sweep
+    ramp_time: 1.0          # duration of each ramp
+    dt: 1.0                 # integration time step saving (solver is adaptive)
+    n_sims: 1400            # number of wait times (the sweep's grid size)
+    n_steps: 201            # resolution of the preview schedule/spectrum plots
+
+  hamiltonian:
+    # The number of qubits is inferred from the length of local_z.
+    # local_x must have the same length; two_body needs n*(n-1)/2 entries.
+    local_z: [2.1, 3.05, 1.78]
+    local_x: [0.0, 0.0, 0.0]
+    two_body: [1.22, 0.54, 0.3]
+
+  decoherence:
+    t1_rates: [0.005, 0.0051, 0.0048]   # amplitude damping, kappa_T1 per qubit
+    t2_rates: [0.01, 0.012, 0.0098]     # pure dephasing,    kappa_phi per qubit
+    r_noise: false    # apply the collapse operators during the ramps
+    w_noise: false    # apply the collapse operators during the wait
+    # With both false the evolution is unitary (sesolve); either one true
+    # switches the affected segments to mesolve, which is markedly slower.
+
+  ramps:
+    # Per-qubit relative ramp speeds. Z and X are ramped independently.
+    # `null` means "all ones" (perfectly symmetric ramps).
+    up_z_assymetry_coefficients: null
+    down_z_assymetry_coefficients: null
+    up_x_assymetry_coefficients: null
+    down_x_assymetry_coefficients: null
+    average_ramp_error: 0.0   # Gaussian noise size on the ramp slope
+    average_wait_error: 0.0   # Gaussian noise size on the wait plateau
+    average_ramp_bias: 0.0    # mean shift of the ramp noise
+
+  initial_state:
+    # presets: minus | plus | zero | one
+    #   minus -> |-> on every qubit, plus -> |+>, zero -> |0>, one -> |1>
+    # For anything else use:
+    #   preset: custom
+    #   per_qubit: [minus, plus, minus]      # one label per qubit
+    # or
+    #   preset: custom
+    #   amplitudes: [...]                    # 2**n_qubits amplitudes
+    preset: minus
+
+  run:
+    noise_seed: 0   # seeds the module-level RNG, making a run reproducible
+
+  plotting:
+    palette: modern         # "sober" (black/red/grey) or "modern"
+    formats: [png]          # e.g. [png, pdf] to also write vector figures
+
+
+# -----------------------------------------------------------------------------
+# Script 1 -- pre-simulation diagnostics and the wait-time sweep
+# -----------------------------------------------------------------------------
+sweep:
+
+  # false -> print the report, make the pre-simulation plots and the runtime
+  # estimate, then stop without running the (expensive) sweep.
+  # The --no-run / --run flags override this.
+  run_simulation: true
+
+  output_root: results/sweeps   # relative paths resolve against this script's dir
+  run_name: null                # null -> sweep_<timestamp>
+
+  averaging:
+    # Run the whole sweep once per noise realization and average the signals
+    # pointwise. Multiplies the runtime by n_averages.
+    enabled: false
+    n_averages: 10
+
+  runtime_estimate:
+    enabled: true
+    n_probe: 3   # wait times timed to extrapolate the total runtime
+
+
+# -----------------------------------------------------------------------------
+# Script 2 -- full diagnostics on a stored pc_list
+# -----------------------------------------------------------------------------
+diagnostics:
+
+  # The run directory produced by script 1. --input-dir overrides this.
+  input_dir: null
+
+  fourier:
+    n_peaks: null              # null -> 2^n * (2^n - 1) / 2, the transition count
+    prominence_threshold: 0.001
+    zero_pad_factor: 32
+    window: hann               # hann | blackmanharris | boxcar
+    detect_prominence: 0.001
+    f_min: 0.001               # ignore peaks below this frequency
+
+  refinement:
+    # Joint nonlinear least-squares refinement, warm-started from the
+    # diagnostics output. Set enabled: false (or pass --no-refine) to skip it.
+    enabled: false
+    reg: null
+    max_nfev: 500
+    verbose: 1
+    freeze_E: true
+    population_mode: subsets   # subsets | dc | off
+    x_scale: auto
+    loss: linear               # linear | soft_l1 | huber | cauchy
+    f_scale: 1.0
+    anchor_kappa_weight: 0.0
+    keep_warm_if_worse: true
+
+
+# -----------------------------------------------------------------------------
+# Script 3 -- amplitude vs. ramp-asymmetry sweep
+# -----------------------------------------------------------------------------
+asymmetry:
+
+  run_simulation: true
+
+  output_root: results/asymmetry   # its own tree, separate from the sweeps
+  run_name: null                   # null -> asymmetry_<timestamp>
+
+  n_asym: 15           # number of asymmetry values
+  a_min: 1.0
+  a_max: 10.0
+  spacing: geometric   # geometric | linear
+
+  target_qubit: 0      # the qubit whose ramp speed is scaled by a
+  sweep_z: true        # scale its Z ramps
+  sweep_x: false       # scale its X ramps
+  n_smallest: 3        # how many of the smallest fitted amplitudes to sum
+
+  runtime_estimate:
+    enabled: true
+    n_probe: 3
+
+  fourier:
+    n_peaks: null
+    prominence_threshold: 0.001
+    zero_pad_factor: 32
+    window: hann
+    detect_prominence: 0.001
+    f_min: 0.1
