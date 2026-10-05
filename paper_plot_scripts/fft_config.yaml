@@ -120,7 +120,7 @@ legend:
 # -----------------------------------------------------------------------------
 style:
   palette: modern             # sober (black/red/grey) | modern
-  colors: null               # e.g. ["black", "#2f6f9f"] -- one per source
+  colors: null #["black", "#c1442a"]               # e.g. ["black", "#2f6f9f"] -- one per source
   linewidth: null            # null -> the paper style's width
   linestyles: null           # e.g. ["-", "--", ":"] cycled over the sources
   alpha: 1.0
@@ -151,7 +151,7 @@ layout:
 #   single 6.0x4.5 | wide 8.0x3.5 | double 11.0x4.5 | triple 16.0x4.0
 # -----------------------------------------------------------------------------
 figure:
-  preset: single
+  preset: double
   size: null                 # [width, height] in inches
 
 

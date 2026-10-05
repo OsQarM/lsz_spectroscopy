@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lzs_pipeline import config as cfgmod  # noqa: E402
 from lzs_pipeline import io_utils as io  # noqa: E402
+from lzs_pipeline import noise_extraction as nx  # noqa: E402
 from lzs_pipeline import presim  # noqa: E402
 
 import matplotlib  # noqa: E402
@@ -77,6 +78,22 @@ def load_signal(input_dir: Path, metadata: dict):
     tw_l = np.load(tw_path) if tw_path.is_file() else None
 
     return pc_list, tw_l, pc_path, (tw_path if tw_l is not None else None)
+
+
+def save_extracted_noise(run_dir: Path, extracted: dict):
+    """Store the recovered per-qubit rates and times."""
+    path = io.unique_path(run_dir / "noise_extraction.npz")
+    np.savez(
+        path,
+        kappa_phi=extracted["kappa_phi"],
+        kappa_T1=extracted["kappa_T1"],
+        T2_phi=extracted["T2_phi"],
+        T1=extracted["T1"],
+        residual=np.asarray(extracted["residual"], dtype=float),
+        pair_rates=extracted["pair_rates"],
+        pair_assigned=extracted["pair_assigned"],
+    )
+    return path
 
 
 def save_diagnostics_data(run_dir: Path, results: dict, refine_results):
@@ -154,6 +171,7 @@ def main(argv=None):
     error_text = None
     data_paths = {}
     wall_seconds = None
+    extracted = None
 
     with io.RunLogger(input_dir, filename="output_diagnostics.txt") as logger:
         io.banner("LZS SPECTROSCOPY -- SCRIPT 2: FULL DIAGNOSTICS",
@@ -249,6 +267,42 @@ def main(argv=None):
             io.section("Diagnostics figures")
             io.kv("Figures captured", len(saved))
 
+            # ---------------- Per-qubit noise extraction ----------------
+            # The inverse of the dephasing comparison: take the fitted
+            # coherence decay rates and solve for each qubit's kappa_phi and
+            # kappa_T1, so the recovered T2 / T1 can be checked against the
+            # values the run was configured with.
+            extracted = None
+            if noise_on:
+                io.banner("PER-QUBIT NOISE EXTRACTION")
+                try:
+                    extracted = nx.extract_noise_parameters(
+                        results["lambdas"], results["freqs"],
+                        results["experimental_energies"], common["n_qubits"],
+                        local_z=common["local_z"], two_body=common["two_body"],
+                        local_x=common["local_x"],
+                        lmd_mn=results.get("lmd_mn"),
+                        predicted=results.get("exact_lambdas"),
+                    )
+                    print(nx.format_report(
+                        extracted,
+                        true_t1=common["t1_rates"],
+                        true_t2=common["t2_rates"]))
+
+                    fig = nx.plot_extracted_noise(
+                        extracted,
+                        true_t1=common["t1_rates"],
+                        true_t2=common["t2_rates"])
+                    if fig is not None:
+                        saver.save(fig, "noise_extraction")
+                except Exception as exc:
+                    # A failure here must not lose the rest of the analysis.
+                    print(f"  noise extraction skipped: {exc}")
+                    extracted = None
+            else:
+                io.banner("PER-QUBIT NOISE EXTRACTION",
+                          "skipped: this run has no decoherence enabled")
+
             # ---------------- Joint refinement ----------------
             refine_results = None
             if refine_on:
@@ -286,6 +340,9 @@ def main(argv=None):
             # ---------------- Save ----------------
             io.banner("SAVING RESULTS")
             data_paths = save_diagnostics_data(input_dir, results, refine_results)
+            if extracted is not None:
+                data_paths["noise_extraction"] = save_extracted_noise(
+                    input_dir, extracted)
             for label, path in data_paths.items():
                 io.kv(label, path)
             io.kv("Analysis wall time", io.fmt_duration(wall_seconds))
@@ -311,6 +368,17 @@ def main(argv=None):
             "wall_seconds": wall_seconds,
             "wall_human": io.fmt_duration(wall_seconds) if wall_seconds else None,
             "data_files": {k: Path(v).name for k, v in data_paths.items()},
+            "noise_extraction": ({
+                "kappa_phi": [float(v) for v in extracted["kappa_phi"]],
+                "kappa_T1": [float(v) for v in extracted["kappa_T1"]],
+                "T2_phi": [float(v) for v in extracted["T2_phi"]],
+                "T1": [float(v) for v in extracted["T1"]],
+                "residual": extracted["residual"],
+                "n_pairs_used": extracted["n_pairs_used"],
+                "n_pairs_total": extracted["n_pairs_total"],
+                "n_unmatched_modes": extracted["n_unmatched_modes"],
+                "used_lmd_mn_fallback": extracted["used_lmd_mn_fallback"],
+            } if extracted is not None else None),
             "figures": [str(p.relative_to(input_dir)) for p in saver.saved],
         }
         if error_text:

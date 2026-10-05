@@ -13,7 +13,7 @@
 # =============================================================================
 
 # The analysed run directory (or the .npz itself). --source overrides it.
-source: ../../new_results/sweeps/3_qubits_T2
+source: ../../new_results/sweeps/3_qubits_T1
 
 
 # -----------------------------------------------------------------------------
@@ -26,6 +26,8 @@ source: ../../new_results/sweeps/3_qubits_T2
 #   rates         fitted vs. predicted coherence decay rates
 #   rate_levels   fitted rates as markers with a dashed line at every
 #                 predicted rate (the style the pipeline's own figure uses)
+#   noise_params  per-qubit kappa_phi / kappa_T1 (or T2 / T1) recovered from
+#                 the fitted rates, against the configured values
 #
 # `rates` and `rate_levels` need a run analysed with noise enabled -- a
 # noiseless run stores no predicted rates, and the script says so rather
@@ -37,6 +39,8 @@ panels:
   - amplitudes
   - phases
   - rates
+  - rate_levels
+  - noise_params
 
 
 # -----------------------------------------------------------------------------
@@ -90,6 +94,7 @@ panel_options:
     mark_best: true        # append "(best)" to the better-fitting branch
     xlabel: True $E_m$
     ylabel: Reconstructed $E_m$
+    color: "black"
 
   amplitudes:
     xlabel: True $|u_m|$
@@ -121,11 +126,27 @@ panel_options:
     level_tolerance: 1.0e-9  # merge predicted values closer than this
     level_color: null      # null -> the palette's reference colour (red)
     level_linestyle: "--"
-    level_linewidth: null
+    marker: "x"            # any matplotlib marker: x | X | + | o | s | ^ ...
+    markersize: 5       # null -> style.MARKERSIZE
+    marker_linewidth: 0.8 # stroke width of the marker; null -> matplotlib default
+    level_linewidth: 0.8
     level_alpha: 0.9
     level_label: predicted   # legend entry for the dashed lines
     marker_label: fitted     # legend entry for the markers; null -> none
     ylabel: Decay rate $\Gamma_{mn}$
+
+  noise_params:
+    # The inverse problem: solve the 2^n(2^n-1)/2 fitted decay rates for the
+    # 2n per-qubit parameters by non-negative least squares. Filled markers
+    # are what was recovered, open red markers the configured values.
+    #
+    # Uses the noise_extraction.npz that script 2 writes when it is there,
+    # and otherwise inverts here from the stored rates.
+    quantity: rates          # rates (kappa) | times (T2_phi, T1)
+    channels: [dephasing, damping]
+    true_marker_scale: 1.6   # size of the open "configured" markers
+    xlabel: Qubit
+    ylabel: Rate
 
 
 # -----------------------------------------------------------------------------
@@ -198,3 +219,9 @@ output:
   transparent: false
   save_data: true          # .npz of every series + .yaml describing them
   save_csv: false
+  # The noise_params panel also as a spreadsheet table (one row per qubit
+  # per channel, with absolute and relative error), written next to the
+  # figure as <name>_noise_params.csv. Opens in Excel / Numbers /
+  # LibreOffice. Blank error cells mean the channel was configured off, so
+  # the recovered value is a bound rather than something to compare.
+  save_noise_params_table: true

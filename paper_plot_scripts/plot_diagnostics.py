@@ -77,6 +77,11 @@ DEFAULTS = {
         "level_alpha": 0.9,
         "level_label": "predicted",
         "marker_label": None,      # e.g. "fitted" to put markers in the legend
+
+        # --- noise_params only ---
+        "quantity": "rates",       # rates (kappa) | times (T2_phi, T1)
+        "channels": None,          # null -> [dephasing, damping]
+        "true_marker_scale": 1.6,  # size of the open "configured" markers
     },
 
     "legend": {
@@ -121,6 +126,7 @@ DEFAULTS = {
         "transparent": False,
         "save_data": True,
         "save_csv": False,
+        "save_noise_params_table": True,
     },
 }
 
@@ -156,6 +162,92 @@ def panel_config(panel: str, cfg: dict) -> dict:
     return merged
 
 
+def draw_noise_params(ax, run: dict, cfg: dict, style):
+    """Recovered per-qubit noise parameters vs. the configured ones.
+
+    Filled markers are what the fit recovered, open red markers the values
+    the run was configured with, at the same qubit index.
+    """
+    opts = panel_config("noise_params", cfg)
+    info = pdiag.noise_param_data(run, opts)
+
+    n = info["n_qubits"]
+    q = np.arange(n)
+    markers = cfg["style"].get("markers") or list(style.MARKERS)
+    ms = float(opts.get("markersize") or style.MARKERSIZE)
+    scale = float(opts.get("true_marker_scale", 1.6))
+
+    is_times = info["quantity"] == "times"
+    series_defs = {
+        "dephasing": (info["kappa_phi"], info["true_phi"], style.DATA,
+                      (r"$T_{2\phi}$" if is_times else r"$\kappa_\phi$")),
+        "damping": (info["kappa_T1"], info["true_T1"], style.SECONDARY,
+                    (r"$T_1$" if is_times else r"$\kappa_{T_1}$")),
+    }
+
+    drawn = []
+    for i, channel in enumerate(info["channels"]):
+        values, truth, color, symbol = series_defs[channel]
+        if opts.get("color"):
+            color = opts["color"]
+        marker = markers[i % len(markers)]
+
+        ax.plot(q, values, marker, color=color, linestyle="none",
+                markersize=ms, alpha=float(opts.get("alpha", 1.0)),
+                label=f"{symbol} recovered", zorder=3)
+
+        if truth is not None:
+            ax.plot(q, truth, marker, markerfacecolor="none",
+                    markeredgecolor=style.REFERENCE, linestyle="none",
+                    markersize=ms * scale, label=f"{symbol} configured",
+                    zorder=2)
+
+        rms = (float(np.sqrt(np.mean((np.asarray(values, dtype=float)
+                                      - np.asarray(truth, dtype=float)) ** 2)))
+               if truth is not None else float("nan"))
+        drawn.append({
+            "key": f"noise_{channel}",
+            "label": f"{symbol} recovered",
+            "x": q.astype(float),
+            "y": np.asarray(values, dtype=float),
+            "truth": (np.asarray(truth, dtype=float)
+                      if truth is not None else np.array([])),
+            "rms_plotted": rms,
+            "color": color,
+            "marker": marker,
+            "channel": channel,
+            "quantity": info["quantity"],
+            "source": info["source"],
+        })
+
+    ax.set_xticks(q)
+    ax.set_xlim(-0.5, n - 0.5)
+
+    ylim = opts.get("ylim")
+    if ylim:
+        ax.set_ylim(float(ylim[0]), float(ylim[1]))
+    if opts.get("grid"):
+        ax.grid(True, which="major", lw=0.4, alpha=0.3)
+
+    ylabel = opts.get("ylabel")
+    if ylabel == pdiag.PANEL_DEFAULT_LABELS["noise_params"]["ylabel"]:
+        ylabel = info["default_ylabel"]
+    style.style_axis(ax, xlabel=opts.get("xlabel"), ylabel=ylabel,
+                     title=opts.get("title"))
+
+    cfg_legend = cfg["legend"]
+    if cfg_legend.get("show", True):
+        handles, labels = ax.get_legend_handles_labels()
+        if labels:
+            ax.legend(frameon=bool(cfg_legend.get("frameon", False)),
+                      fontsize=cfg_legend.get("fontsize") or style.FONT_LEGEND,
+                      loc=cfg_legend.get("loc", "best"),
+                      ncol=int(cfg_legend.get("ncol", 1)),
+                      title=cfg_legend.get("title"))
+
+    return drawn
+
+
 def draw_rate_levels(ax, run: dict, cfg: dict, style):
     """Fitted decay rates as markers, predicted rates as dashed h-lines.
 
@@ -175,8 +267,10 @@ def draw_rate_levels(ax, run: dict, cfg: dict, style):
     marker = opts.get("marker") or markers[0]
     ms = float(opts.get("markersize") or style.MARKERSIZE)
 
+    mew = opts.get("marker_linewidth")
     ax.plot(x, lambdas, marker, color=color, linestyle="none",
             markersize=ms, alpha=float(opts.get("alpha", 1.0)),
+            **({"markeredgewidth": float(mew)} if mew is not None else {}),
             label=opts.get("marker_label"), zorder=3)
 
     if predicted is not None and len(predicted):
@@ -242,6 +336,8 @@ def draw_panel(ax, panel: str, run: dict, cfg: dict, style):
     """Draw one estimate-vs-true panel; returns the series it plotted."""
     if panel == "rate_levels":
         return draw_rate_levels(ax, run, cfg, style)
+    if panel == "noise_params":
+        return draw_noise_params(ax, run, cfg, style)
 
     opts = panel_config(panel, cfg)
     cfg_style = cfg["style"]
@@ -448,7 +544,11 @@ def main(argv=None):
                     "magnitude": d["y"],    # y: estimated values
                     # For rate_levels this carries the predicted levels the
                     # dashed lines sit at, as the other figures' 'peaks' do.
-                    "peaks": np.asarray(d.get("predicted", []), dtype=float),
+                    # For rate_levels these are the predicted levels the
+                    # dashed lines sit at; for noise_params, the configured
+                    # values the open markers show.
+                    "peaks": np.asarray(
+                        d.get("predicted", d.get("truth", [])), dtype=float),
                 })
 
         meta = {
@@ -476,6 +576,10 @@ def main(argv=None):
                         "x_axis": d["x_mode"],
                         "n_predicted_levels": int(len(d["predicted"]))}
                        if d["key"] == "rate_levels" else {}),
+                    **({"channel": d["channel"],
+                        "quantity": d["quantity"],
+                        "extraction_source": d["source"]}
+                       if d["key"].startswith("noise_") else {}),
                     **({"is_best_turnpike_branch": bool(d["is_best"])}
                        if "is_best" in d else {}),
                 }
@@ -486,6 +590,13 @@ def main(argv=None):
         data_written = pfig.save_plot_data(out_dir, base_name, series_out, meta)
         if cfg["output"].get("save_csv", False):
             data_written += pfig.save_series_csv(out_dir, base_name, series_out)
+        # The noise_params panel is six numbers in two groups: also write it
+        # as a spreadsheet table, where the relative error can be read off.
+        if cfg["output"].get("save_noise_params_table", True):
+            noise_drawn = [d for panel in panels for d in all_drawn[panel]
+                           if d["key"].startswith("noise_")]
+            data_written += pfig.save_noise_params_table(
+                out_dir, base_name, noise_drawn, run["n_qubits"])
         print("Plot data written:")
         for p in data_written:
             print(f"  {p}")

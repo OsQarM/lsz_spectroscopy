@@ -198,6 +198,7 @@ wrote — nothing is recomputed.
 | `phases` | estimated vs. exact `phi_m` |
 | `rates` | fitted vs. predicted coherence decay rates `Gamma_mn` |
 | `rate_levels` | fitted rates as markers, one dashed line per predicted rate |
+| `noise_params` | per-qubit T1 / T2 recovered from the fitted rates, vs. configured |
 
 `rates` and `rate_levels` need a run analysed with noise enabled — a
 noiseless run stores no predicted rates, and the script says so instead of
@@ -217,9 +218,65 @@ panel_options:
     predicted: exact     # exact | possible | none
     x: index             # index | frequency
     sort_by: rate
+    marker: "x"            # any matplotlib marker
+    markersize: null       # null -> style.MARKERSIZE
+    marker_linewidth: null # marker stroke width; null -> matplotlib default
+    level_linewidth: 0.6   # dashed-line weight
     level_label: predicted
     marker_label: fitted
 ```
+
+### The `noise_params` panel
+
+The inverse of `rate_levels`: instead of checking the fitted rates against
+predicted ones, it solves them for the per-qubit noise parameters. The
+`2^n(2^n-1)/2` observed rates over-determine the `2n` unknowns, and the
+design matrix is full rank (28x6, condition ~4 for 3 qubits), so dephasing
+and amplitude damping separate cleanly. Filled markers are recovered, open
+red markers the configured values.
+
+```yaml
+panel_options:
+  noise_params:
+    quantity: rates          # rates (kappa) | times (T2_phi, T1)
+    channels: [dephasing, damping]
+```
+
+Six numbers in two groups of three read better as digits than as markers, so
+this panel is *also* written out as a spreadsheet table —
+`<name>_noise_params.csv`, next to the figure, one row per qubit per channel:
+
+| parameter | qubit | configured | recovered | abs_error | rel_error_percent |
+|---|---|---|---|---|---|
+| T2_phi | 0 | 500 | 497.07 | -2.93 | -0.59 |
+
+It opens directly in Excel, Numbers or LibreOffice. Turn it off with
+`output.save_noise_params_table: false`.
+
+A blank error pair means the channel was configured *off* — a run with no
+damping has `kappa_T1 = 0`, which in `quantity: times` is an infinite T1.
+Differencing against that would report a correct null result as a `-100%`
+error, so the comparison is left blank and the recovered value stands as the
+bound it is.
+
+It uses the `noise_extraction.npz` that script 2 writes (the most recent
+one, since re-running script 2 writes `_2`, `_3`, ... rather than
+overwriting), falling back to inverting from the stored rates.
+
+**It needs `exact_lambdas`.** Assigning each fitted rate to the level pair
+it came from is what carries the information about *which qubits* are
+involved, and many pairs in these spectra share a transition frequency, so
+frequency alone cannot resolve them. The predicted rates break that tie.
+Without them the assignment falls back to frequency and the report says the
+dephasing / T1 split may be unreliable -- on the T1 run, the frequency-only
+assignment returned kappa_T1 of essentially zero against a configured
+0.001. On the 3-qubit T2 run it recovers
+kappa_phi to ~1% (T2 of 497 / 446 / 540 against 500 / 450 / 532) and
+correctly returns kappa_T1 of ~0 for a run with no amplitude damping.
+
+A run whose metadata lists t1/t2 rates but has `r_noise` and `w_noise` both
+false never applied them, so the panel refuses rather than plotting
+recovered zeros against rates that were never in the signal.
 
 **On `predicted`:** the pipeline's figure draws `possible_lambdas`, the
 dephasing-only subset sums, which omit the T1 contribution — on a run with

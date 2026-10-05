@@ -9,7 +9,9 @@ numeric suffix.
 from __future__ import annotations
 
 import copy
+import csv
 import datetime as _dt
+import math
 from pathlib import Path
 
 import numpy as np
@@ -195,6 +197,70 @@ def save_series_csv(out_dir: Path, name: str, series: list[dict]) -> list[Path]:
                    comments="")
         written.append(path)
     return written
+
+
+def save_noise_params_table(out_dir: Path, name: str, drawn: list[dict],
+                            n_qubits: int) -> list[Path]:
+    """Per-qubit recovered vs. configured noise parameters, as a CSV table.
+
+    Six numbers in two groups of three read better as digits than as markers,
+    so the figure's `noise_params` panel is also written out as a table one
+    row per qubit per channel, with the relative error worked out. CSV rather
+    than .xlsx so the paper pipeline keeps its dependencies and the file stays
+    diffable; it opens directly in Excel, Numbers and LibreOffice.
+    """
+    rows = []
+    for d in drawn:
+        if not d.get("key", "").startswith("noise_"):
+            continue
+        values = np.asarray(d["y"], dtype=float)
+        truth = np.asarray(d.get("truth", []), dtype=float)
+        quantity = d.get("quantity", "rates")
+        # `quantity: times` already inverted rates to T2_phi / T1 upstream.
+        symbol = {"dephasing": "T2_phi" if quantity == "times" else "kappa_phi",
+                  "damping": "T1" if quantity == "times" else "kappa_T1"}.get(
+                      d.get("channel"), d.get("channel", "?"))
+        for q in range(min(len(values), n_qubits)):
+            rec = float(values[q])
+            has_truth = q < len(truth)
+            cfg_val = float(truth[q]) if has_truth else float("nan")
+            # A run with no damping has a configured rate of 0, which in
+            # `quantity: times` inverts to an infinite (or ~1e12 sentinel)
+            # T1. Differencing against that would report a correct null
+            # result as a -100% error, so leave the comparison blank and let
+            # the recovered value stand as the bound it is.
+            # Both sentinels for "this channel was off": an infinite/huge
+            # configured time, or a negligible configured rate. Dividing by
+            # either turns a correct null result into a nonsense percentage.
+            unbounded = ((not math.isfinite(cfg_val)) or abs(cfg_val) >= 1e11
+                         or (cfg_val != 0.0 and abs(cfg_val) <= 1e-11))
+            comparable = has_truth and not unbounded
+            abs_err = rec - cfg_val if comparable else float("nan")
+            rel_err = (abs_err / cfg_val * 100.0
+                       if comparable and cfg_val != 0.0 else float("nan"))
+            if unbounded and has_truth and abs(cfg_val) >= 1e11:
+                cfg_val = float("inf")
+            rows.append((symbol, q, cfg_val, rec, abs_err, rel_err))
+
+    if not rows:
+        return []
+
+    path = unique_path(out_dir / f"{name}_noise_params.csv")
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["parameter", "qubit", "configured", "recovered",
+                    "abs_error", "rel_error_percent"])
+        for symbol, q, cfg_val, rec, abs_err, rel_err in rows:
+            def fmt(v):
+                if isinstance(v, float):
+                    if math.isnan(v):
+                        return ""
+                    if math.isinf(v):
+                        return "inf" if v > 0 else "-inf"
+                return f"{v:.6g}"
+            w.writerow([symbol, q, fmt(cfg_val), fmt(rec), fmt(abs_err),
+                        fmt(rel_err)])
+    return [path]
 
 
 def to_plain(obj):

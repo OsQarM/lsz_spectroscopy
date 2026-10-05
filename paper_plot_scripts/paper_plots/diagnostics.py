@@ -25,13 +25,16 @@ import yaml
 
 
 PANELS = ("transitions", "energies", "amplitudes", "phases", "rates",
-          "rate_levels")
+          "rate_levels", "noise_params")
 
 # `rate_levels` is not an estimate-vs-true scatter: it plots the fitted rates
 # against mode index (or frequency) with a dashed horizontal line at every
 # distinct predicted rate, as `plotting.diagnostic_plots.plot_decay_rates`
 # does. It is drawn by its own routine.
-SCATTER_PANELS = tuple(p for p in PANELS if p != "rate_levels")
+# `noise_params` is also drawn on its own: recovered per-qubit kappa_phi /
+# kappa_T1 (or T2 / T1 times) against the configured values, per qubit.
+SCATTER_PANELS = tuple(p for p in PANELS
+                       if p not in ("rate_levels", "noise_params"))
 
 PANEL_DEFAULT_LABELS = {
     "transitions": {
@@ -57,6 +60,10 @@ PANEL_DEFAULT_LABELS = {
     "rate_levels": {
         "xlabel": r"mode index",
         "ylabel": r"decay rate $\Gamma_{mn}$",
+    },
+    "noise_params": {
+        "xlabel": r"qubit",
+        "ylabel": r"rate",
     },
 }
 
@@ -341,4 +348,125 @@ def rate_level_data(run: dict, cfg_panel: dict) -> dict:
         "x_mode": x_mode,
         "default_xlabel": default_xlabel,
         "predicted_source": which,
+    }
+
+
+# --------------------------------------------------------------------------
+# noise_params panel
+# --------------------------------------------------------------------------
+def noise_param_data(run: dict, cfg_panel: dict) -> dict:
+    """Recovered per-qubit noise parameters against the configured ones.
+
+    Prefers the `noise_extraction.npz` that script 2 writes, since that was
+    solved where the eigenvectors were available. Falls back to inverting
+    the stored rates here, which needs the Hamiltonian from the run's
+    metadata to put the levels in the right order.
+    """
+    import sys
+    from pathlib import Path as _Path
+
+    run_dir = run["run_dir"]
+    # Re-running script 2 never overwrites, so a corrected extraction lands
+    # beside the original as _2, _3, ... Take the most recently written one.
+    candidates = sorted(run_dir.glob("noise_extraction*.npz"),
+                        key=lambda f: f.stat().st_mtime)
+
+    kphi = kt1 = None
+    source = None
+    if candidates:
+        npz = candidates[-1]
+        with np.load(npz, allow_pickle=True) as archive:
+            kphi = np.asarray(archive["kappa_phi"], dtype=float)
+            kt1 = np.asarray(archive["kappa_T1"], dtype=float)
+        source = npz.name
+    else:
+        # Invert here. The extraction module lives with the pipeline, so it
+        # is imported by path rather than duplicated.
+        pipeline = _Path(__file__).resolve().parents[2] / "refactored_code"
+        if str(pipeline) not in sys.path:
+            sys.path.insert(0, str(pipeline))
+        try:
+            from lzs_pipeline.noise_extraction import extract_noise_parameters
+        except ImportError as exc:
+            raise DiagnosticsError(
+                f"panel 'noise_params' needs either a noise_extraction.npz in "
+                f"{run_dir} (re-run script 2) or the refactored_code package "
+                f"on the path: {exc}")
+
+        data = run["data"]
+        for key in ("lambdas", "freqs", "experimental_energies"):
+            if key not in data:
+                raise DiagnosticsError(
+                    f"panel 'noise_params' needs '{key}' to invert the rates, "
+                    f"which this run's archive does not contain")
+        ham = run["hamiltonian"]
+        if not ham.get("local_z"):
+            raise DiagnosticsError(
+                "panel 'noise_params' needs the Hamiltonian from the run's "
+                "metadata.yaml to order the levels; none was found")
+        n_qubits = len(ham["local_z"])
+        extracted = extract_noise_parameters(
+            data["lambdas"], data["freqs"], data["experimental_energies"],
+            n_qubits,
+            local_z=ham["local_z"], two_body=ham.get("two_body", []),
+            local_x=ham.get("local_x"),
+            lmd_mn=data.get("lmd_mn"))
+        kphi = extracted["kappa_phi"]
+        kt1 = extracted["kappa_T1"]
+        source = "re-inverted here"
+
+    # The configured values, if the run recorded them -- but only if the
+    # run actually *applied* them. A metadata block can carry t1/t2 rates
+    # while r_noise and w_noise are both false, in which case the signal is
+    # unitary: showing those rates as "configured" would suggest the
+    # extraction failed when there was simply no decoherence to find.
+    dec = (run["metadata"].get("common", {}) or {}).get("decoherence", {}) or {}
+    noise_applied = bool(dec.get("r_noise", False) or dec.get("w_noise", False))
+    if dec and not noise_applied:
+        raise DiagnosticsError(
+            "panel 'noise_params': this run was simulated without "
+            "decoherence (r_noise and w_noise are both false), so the fitted "
+            "decay rates carry no per-qubit noise to invert. The t1/t2 rates "
+            "in its metadata were never applied. Use a run with noise "
+            "enabled.")
+    true_phi = dec.get("t2_rates")
+    true_t1 = dec.get("t1_rates")
+    true_phi = np.asarray(true_phi, dtype=float) if true_phi is not None else None
+    true_t1 = np.asarray(true_t1, dtype=float) if true_t1 is not None else None
+
+    quantity = str(cfg_panel.get("quantity", "rates")).lower()
+    if quantity == "times":
+        def invert(v):
+            if v is None:
+                return None
+            v = np.asarray(v, dtype=float)
+            with np.errstate(divide="ignore"):
+                return np.where(v > 0, 1.0 / np.where(v > 0, v, 1.0), np.inf)
+        kphi, kt1 = invert(kphi), invert(kt1)
+        true_phi, true_t1 = invert(true_phi), invert(true_t1)
+        default_ylabel = "time"
+    elif quantity == "rates":
+        default_ylabel = "rate"
+    else:
+        raise ValueError(
+            f"panels.noise_params.quantity must be 'rates' or 'times', "
+            f"got {quantity!r}")
+
+    channels = cfg_panel.get("channels") or ["dephasing", "damping"]
+    for c in channels:
+        if c not in ("dephasing", "damping"):
+            raise ValueError(
+                f"panels.noise_params.channels entries must be 'dephasing' "
+                f"or 'damping', got {c!r}")
+
+    return {
+        "kappa_phi": kphi,
+        "kappa_T1": kt1,
+        "true_phi": true_phi,
+        "true_T1": true_t1,
+        "channels": channels,
+        "quantity": quantity,
+        "default_ylabel": default_ylabel,
+        "source": source,
+        "n_qubits": int(np.asarray(kphi).size),
     }

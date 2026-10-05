@@ -21,7 +21,7 @@ common:
 
   protocol:
     epsilon: 1.0            # coefficient of the transverse (X) Hamiltonian
-    max_wait_time: 300    # longest wait time in the sweep
+    max_wait_time: 200    # longest wait time in the sweep
     ramp_time: 1          # duration of each ramp
     dt: 1.0                 # integration time step saving (solver is adaptive)
     n_sims: 2000           # number of wait times (the sweep's grid size)
@@ -31,43 +31,53 @@ common:
     # The number of qubits is inferred from the length of local_z.
     # local_x must have the same length; two_body needs n*(n-1)/2 entries.
 
+    #Example 2 qubits
     #  local_z:  [2.1, 1.1]
     #  local_x:  [0., 0.]
     #  two_body: [0.35]
 
+    # 2 qubit bell state
+    local_z:  [1., 1.]
+    local_x:  [1., 1.]
+    two_body: [1.]
+
+    #Example 3 qubits (old)
     # local_z:  [2.1, 3.05, 1.78]
     # local_x:  [0.0, 0.0, 0.0]
     # two_body: [1.22, 0.54, 0.3]
 
-    local_z:  [0.9148, 0.1701, 0.7865]
-    local_x:  [0.0, 0.0, 0.0]
-    two_body: [0.1223, 0.641,  0.8896]
 
+    #Example 3 qubits (new)
+    # local_z:  [0.9148, 0.1701, 0.7865]
+    # local_x:  [0.0, 0.0, 0.0]
+    # two_body: [0.1223, 0.641,  0.8896]
+
+    #Example 4 qubits
     # local_z:  [-0.1126,  1.4211, -2.1216,  0.1441]
     # local_x:  [0.0, 0.0, 0.0, 0.0]
     # two_body: [ 2.8125, -1.5356, -1.5177, -2.5558, -2.6771, -2.904]
 
   decoherence:
 
-    # t1_rates: [0.011, 0.009]
-    # t2_rates: [0.008, 0.011]
-    t1_rates: [0.001, 0.0011, 0.000909]   # amplitude damping, kappa_T1 per qubit
-    t2_rates: [0.00200, 0.00222, 0.00188]    # pure dephasing,    kappa_phi per qubit
+    t1_rates: [0.011, 0.009]
+    t2_rates: [0.008, 0.011]
+    # t1_rates: [0.001, 0.0011, 0.000909]   # amplitude damping, kappa_T1 per qubit
+    # t2_rates: [0.00200, 0.00222, 0.00188]    # pure dephasing,    kappa_phi per qubit
     r_noise: false    # apply the collapse operators during the ramps
-    w_noise: true    # apply the collapse operators during the wait
+    w_noise: false    # apply the collapse operators during the wait
     # With both false the evolution is unitary (sesolve); either one true
     # switches the affected segments to mesolve, which is markedly slower.
 
   ramps:
     # Per-qubit relative ramp speeds. Z and X are ramped independently.
     # `null` means "all ones" (perfectly symmetric ramps).
-    up_z_assymetry_coefficients: null
-    down_z_assymetry_coefficients: null
-    up_x_assymetry_coefficients: null
-    down_x_assymetry_coefficients: null
-    average_ramp_error: 0.0   # Gaussian noise size on the ramp slope
+    up_z_assymetry_coefficients: [1,1]
+    down_z_assymetry_coefficients: [1,1]
+    up_x_assymetry_coefficients: [1,1]
+    down_x_assymetry_coefficients: [1,1]
+    average_ramp_error: 0.1   # Gaussian noise size on the ramp slope
     average_wait_error: 0.0   # Gaussian noise size on the wait plateau
-    average_ramp_bias: 0.0    # mean shift of the ramp noise
+    average_ramp_bias: 0.5    # mean shift of the ramp noise
 
   initial_state:
     # presets: minus | plus | zero | one
@@ -104,7 +114,7 @@ sweep:
   averaging:
     # Run the whole sweep once per noise realization and average the signals
     # pointwise. Multiplies the runtime by n_averages.
-    enabled: false
+    enabled: true
     n_averages: 10
 
   runtime_estimate:
@@ -119,7 +129,7 @@ diagnostics:
 
   # The run directory produced by script 1. --input-dir overrides this.
   input_dir: "/Users/omichel/Desktop/qilimanjaro/projects/\
-  LZS_spectroscopy/new_results/sweeps/sweep_20261005-100838"
+  LZS_spectroscopy/new_results/sweeps/sweep_20261005-133147"
 
 
   fourier:
