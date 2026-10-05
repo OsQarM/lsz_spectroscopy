@@ -1,0 +1,205 @@
+# =============================================================================
+# Paper figure: the ramp schedule s(t) of an example run
+# =============================================================================
+#
+#   python plot_schedule.py
+#
+# Every key is optional -- anything omitted falls back to the defaults in
+# plot_schedule.py. Relative paths resolve against this script's directory.
+#
+# The schedules are evaluated with the real LSZ_experiment, so asymmetries
+# and schedule noise appear exactly as the simulations apply them.
+# =============================================================================
+
+# Optionally take the protocol from an existing run's metadata.yaml (qubit
+# count, ramp time, asymmetries, errors). Anything set under `protocol`
+# below still wins, so you can borrow a run's asymmetries but pick your own
+# wait time for the figure. null -> use `protocol` alone.
+from_run: null
+# from_run: ../../new_results/sweeps/3_qubits_good_1ns
+
+
+# -----------------------------------------------------------------------------
+# The protocol being drawn.
+#
+# A figure usually wants a *short* wait time: it only has to show that there
+# is a plateau between the ramps, and a realistic 300-unit wait would squash
+# the ramps into two vertical lines.
+# -----------------------------------------------------------------------------
+protocol:
+  n_qubits: 3
+  ramp_time: 1.0
+  wait_time: 1.5
+  n_steps: 1001            # resolution of the drawn curves
+
+  # Per-qubit relative ramp speeds; null -> all ones (symmetric).
+  # Set these to show the asymmetry the paper is discussing, e.g. [2, 1].
+  up_z_assymetry_coefficients: null
+  down_z_assymetry_coefficients: null
+  up_x_assymetry_coefficients: null
+  down_x_assymetry_coefficients: null
+
+  # Schedule noise. Zero gives the clean, idealised schedule.
+  average_ramp_error: 0.0
+  average_wait_error: 0.0
+  average_ramp_bias: 0.0
+  noise_seed: 0
+
+
+# -----------------------------------------------------------------------------
+# Which lines to draw. Set `show: false` on a family to leave it out --
+# e.g. common/h0/x off and z on gives a figure with only the H_z schedules.
+#
+# For `z` and `x`, `qubits:` picks which qubits to draw:
+#   null    every qubit
+#   [0]     only qubit 0
+#   [0, 2]  qubits 0 and 2
+#
+# Labels may contain {i} for the qubit index (or {n} for index + 1).
+# -----------------------------------------------------------------------------
+lines:
+
+  common:                              # the (H0 + Hzz) envelope s(t)
+    show: true
+    label: 
+    color: null
+    linestyle: "-"
+    linewidth: null
+    alpha: 1.0
+
+  h0:                                  # the complementary weight (1 - s)
+    show: false
+    label: $H_0$  $(1-s)$
+    color: null
+    linestyle: ":"
+    linewidth: null
+    alpha: 1.0
+
+  z:                                   # per-qubit local Z schedules
+    show: false
+    qubits: null
+    label: $H_z[{i}]$
+    colors: null                       # e.g. ["black", "#c1442a"]
+    linestyle: "-"
+    linewidth: null
+    alpha: 1.0
+
+  x:                                   # per-qubit local X schedules
+    show: false
+    qubits: null
+    label: $H_x[{i}]$
+    colors: null
+    linestyle: "--"
+    linewidth: null
+    alpha: 1.0
+
+
+# -----------------------------------------------------------------------------
+# Markers at the segment boundaries, with their names on the x axis.
+# -----------------------------------------------------------------------------
+markers:
+  show: true
+
+  start: true              # t = 0
+  end_ramp1: true          # end of the first ramp
+  end_wait: true           # end of the wait
+  end_ramp2: true          # end of the second ramp
+
+  labels:
+    start: $0$
+    end_ramp1: $T$
+    end_wait: $T+\tau$
+    end_ramp2: $2T + \tau$
+
+  replace_xticks: true     # put those labels on the x axis in place of numbers
+
+  # A boundary can carry a tick label without a vertical line. List the
+  # boundaries that should get only a label in `no_line`. That is what you
+  # want at t = 0 and t = t_f, where a line would sit on the axis spine and
+  # be invisible (or force a gap between the curve and the y axis).
+  no_line: [start]
+  lines: null              # or list exactly which boundaries get a line
+
+  color: null              # null -> the palette's guide grey
+  linestyle: ":"
+  linewidth: 0.9
+  alpha: 0.8
+
+  shade_wait: false        # a light band over the wait window
+  shade_color: null
+  shade_alpha: 0.08
+
+  annotate_segments: false # name the spans across the top of the panel
+  segment_labels:
+    ramp1: ramp up
+    wait: wait
+    ramp2: ramp down
+  segment_fontsize: 10
+
+
+# -----------------------------------------------------------------------------
+# Axes
+# -----------------------------------------------------------------------------
+axes:
+  xlabel: $t$
+  ylabel: $B_t$
+  title: null
+  xlim: null               # null -> the full protocol, 0 ... t_f
+  ylim: null               # null -> the data range plus y_margin
+  x_margin: 0.0            # 0 -> curve starts flush against the y axis
+  y_margin: 0.08
+  grid: false
+
+
+# -----------------------------------------------------------------------------
+# Legend
+# -----------------------------------------------------------------------------
+legend:
+  show: true
+  loc: best
+  frameon: false
+  fontsize: null
+  ncol: 1
+  title: null
+
+
+# -----------------------------------------------------------------------------
+# Appearance. Defaults come from src/plotting/style.py.
+# -----------------------------------------------------------------------------
+style:
+  palette: modern           # sober (black/red/grey) | modern
+  colors: null             # one per drawn line, in order
+  linewidth: null
+  alpha: 1.0
+
+  font_sizes:
+    label: null
+    tick: null
+    legend: null
+    title: null
+
+  rcparams: {}
+
+
+# -----------------------------------------------------------------------------
+# Figure geometry. `size` wins over `preset`.
+#   single 6.0x4.5 | wide 8.0x3.5 | double 11.0x4.5 | triple 16.0x4.0
+# -----------------------------------------------------------------------------
+figure:
+  preset: single
+  size: null
+
+
+# -----------------------------------------------------------------------------
+# Output. Same convention as plot_fft.py: the figure and the data behind it
+# land together, and nothing is ever overwritten.
+# -----------------------------------------------------------------------------
+output:
+  directory: ../../new_results/paper_plot_images/schedule
+  name: schedule
+  timestamp: false
+  formats: [pdf, png]
+  dpi: 500
+  transparent: false
+  save_data: true          # .npz of every curve + .yaml describing them
+  save_csv: false

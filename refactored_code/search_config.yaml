@@ -1,0 +1,70 @@
+# =============================================================================
+# Random-Hamiltonian search -- maximise the minimum peak separation
+# =============================================================================
+#
+# Used by 04_search_hamiltonians.py. For each sampled Hamiltonian the script
+# diagonalises the midpoint (target) Hamiltonian, forms all 2^n*(2^n-1)/2
+# transition frequencies, and records the smallest gap between any two of
+# them. That gap is the "Closest true freq. spacing" reported by the
+# pipeline's sampling-adequacy check: the FFT needs
+# max_wait_time >= 1/gap to resolve the two closest peaks, so a larger gap
+# means a shorter, cheaper sweep.
+#
+# The search keeps only the best Hamiltonian found, not all of them.
+# =============================================================================
+
+search:
+
+  n_qubits: 4
+  n_samples: 1000000     # Hamiltonians to try
+  seed: 0               # null -> nondeterministic
+  batch_size: 20000     # samples evaluated per vectorised batch
+
+  # Report the gap in the same units as the pipeline's sampling check:
+  #   frequency -> Delta_eps / (2*pi), what 1/max_wait_time is compared against
+  #   angular   -> raw Delta_eps
+  units: frequency
+
+  # Optional: reject any Hamiltonian whose highest transition frequency
+  # exceeds this (it would need a finer wait-time grid to stay below
+  # Nyquist). null disables the cap. Same units as `units` above.
+  max_frequency: null
+
+  # How many of the best Hamiltonians to report and store.
+  top_k: 10
+
+  output_root: ../../new_results/hamiltonian_search
+  run_name: null        # null -> search_<timestamp>
+
+
+# -----------------------------------------------------------------------------
+# What to sample and what to hold fixed.
+# -----------------------------------------------------------------------------
+# Each of the three term groups takes either:
+#
+#   sample: true   + bounds: [lo, hi]   -> drawn uniformly in [lo, hi]
+#   sample: false  + value: <number>    -> every entry held at this constant
+#   sample: false  + value: [a, b, c]   -> entries held at these constants
+#
+# `two_body` needs n*(n-1)/2 entries when given as a list; the pair order is
+# (0,1), (0,2), ..., (1,2), ... matching the rest of the codebase.
+#
+# Setting `discrete: <step>` on a sampled group snaps the draws to a grid of
+# that step (e.g. 0.01), which is useful when the hardware can only realise
+# certain couplings. null -> continuous.
+# -----------------------------------------------------------------------------
+terms:
+
+  local_z:
+    sample: true
+    bounds: [-3, 3]
+    discrete: null
+
+  local_x:
+    sample: false
+    value: 0.0
+
+  two_body:
+    sample: true
+    bounds: [-3, 3]
+    discrete: null

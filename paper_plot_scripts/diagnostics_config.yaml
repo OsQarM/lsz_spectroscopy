@@ -1,0 +1,200 @@
+# =============================================================================
+# Paper figure: the diagnostic estimate-vs-true panels
+# =============================================================================
+#
+#   python plot_diagnostics.py
+#
+# Reads the diagnostics_results.npz written by
+# refactored_code/02_run_diagnostics.py, so the figure re-draws the analysis
+# that was actually run -- nothing is recomputed.
+#
+# Every key is optional. Relative paths resolve against this script's
+# directory.
+# =============================================================================
+
+# The analysed run directory (or the .npz itself). --source overrides it.
+source: ../../new_results/sweeps/3_qubits_T2
+
+
+# -----------------------------------------------------------------------------
+# Which panels to draw, in order.
+#
+#   transitions   detected vs. true transition energies
+#   energies      reconstructed vs. true energy levels (both turnpike branches)
+#   amplitudes    estimated vs. exact state-vector moduli |u_m|
+#   phases        estimated vs. exact phases phi_m
+#   rates         fitted vs. predicted coherence decay rates
+#   rate_levels   fitted rates as markers with a dashed line at every
+#                 predicted rate (the style the pipeline's own figure uses)
+#
+# `rates` and `rate_levels` need a run analysed with noise enabled -- a
+# noiseless run stores no predicted rates, and the script says so rather
+# than drawing nothing.
+# -----------------------------------------------------------------------------
+panels:
+  - transitions
+  - energies
+  - amplitudes
+  - phases
+  - rates
+
+
+# -----------------------------------------------------------------------------
+# Options applied to every panel. Anything here can be overridden per panel
+# under `panel_options` below.
+# -----------------------------------------------------------------------------
+common_panel:
+  xlabel: null             # null -> the panel's own default label
+  ylabel: null
+  title: null
+  xlim: null               # [min, max]
+  ylim: null
+  equal_limits: true       # same range on both axes, as an identity plot wants
+  sort: true               # compare sorted estimates against sorted truth
+  grid: false
+
+  marker: null             # null -> the style's marker cycle
+  markersize: null
+  color: null              # null -> the palette (best branch darker)
+  alpha: 1.0
+
+  identity: true           # the red dashed y = x reference
+  identity_label: null     # e.g. "estimate = true" to put it in the legend
+
+  annotate_rms: false      # print the RMS error inside the panel
+  rms_fontsize: 10
+
+
+# -----------------------------------------------------------------------------
+# Per-panel overrides. Only the keys you set are changed.
+# -----------------------------------------------------------------------------
+panel_options:
+
+  transitions:
+    # The detected peaks were already matched one-to-one against the true
+    # differences, so keep that pairing instead of re-sorting.
+    sort: false
+    xlabel: True $\Delta\varepsilon$
+    ylabel: Detected $\Delta\varepsilon$
+
+  energies:
+    # Both solutions of the turnpike problem. A reconstruction is determined
+    # only up to reflection, so the forward and reversed branches both
+    # reproduce the measured difference set; plotting both shows which one
+    # the true spectrum picks out.
+    #   both | best | forward | reversed
+    branches: both
+    branch_labels:
+      forward:  Solution 1
+      reversed: Solution 2
+    mark_best: true        # append "(best)" to the better-fitting branch
+    xlabel: True $E_m$
+    ylabel: Reconstructed $E_m$
+
+  amplitudes:
+    xlabel: True $|u_m|$
+    ylabel: Estimated $|\tilde{u}_m|$
+
+  phases:
+    xlabel: True $\phi_m$
+    ylabel: Estimated $\tilde{\phi}_m$
+
+  rates:
+    xlabel: Predicted $\Gamma_{mn}$
+    ylabel: Fitted $\Gamma_{mn}$
+
+  rate_levels:
+    # Fitted rates as markers, with a dashed horizontal line at every
+    # distinct predicted rate -- the same idea as plot_decay_rates in
+    # src/plotting/diagnostic_plots.py.
+    #
+    # predicted:
+    #   exact     the per-pair Gamma_mn from the T1 + T2 formula. These are
+    #             what the fitted rates actually sit on.      (default)
+    #   possible  the dephasing-only subset sums, which is what the
+    #             pipeline's own figure draws. It ignores T1, so the lines
+    #             will sit below the markers when damping is present.
+    #   none      markers only.
+    predicted: exact
+    x: index               # index | frequency
+    sort_by: rate          # rate | x | null -- sorting shows the grouping
+    level_tolerance: 1.0e-9  # merge predicted values closer than this
+    level_color: null      # null -> the palette's reference colour (red)
+    level_linestyle: "--"
+    level_linewidth: null
+    level_alpha: 0.9
+    level_label: predicted   # legend entry for the dashed lines
+    marker_label: fitted     # legend entry for the markers; null -> none
+    ylabel: Decay rate $\Gamma_{mn}$
+
+
+# -----------------------------------------------------------------------------
+# Legend
+# -----------------------------------------------------------------------------
+legend:
+  show: true
+  loc: best                # best | upper left | lower right | ...
+  frameon: false
+  fontsize: null
+  ncol: 1
+  title: null
+  # A lone unlabelled series needs no legend; set false to force one anyway
+  # (useful together with identity_label).
+  only_when_multiple: true
+
+
+# -----------------------------------------------------------------------------
+# Appearance. Defaults come from src/plotting/style.py.
+# -----------------------------------------------------------------------------
+style:
+  palette: modern           # sober (black/red/grey) | modern
+  colors: null             # e.g. ["black", "#2f6f9f"] -- one per series
+  markers: null            # e.g. ["o", "x", "s"]
+  linewidth: null
+  alpha: 1.0
+
+  font_sizes:
+    label: null
+    tick: null
+    legend: null
+    title: null
+
+  rcparams: {}
+
+
+# -----------------------------------------------------------------------------
+# How the panels are arranged.
+#   separate: true   one file per panel, named <name>_<panel>
+#   ncols            panels per row; null -> all in a single row
+#   panel_size       [w, h] in inches per panel; null -> the `figure` preset
+# -----------------------------------------------------------------------------
+layout:
+  separate: true
+  ncols: 2
+  panel_size: null
+  panel_letters: false     # label the panels (a), (b), (c), ...
+  letter_fontsize: 13
+
+
+# -----------------------------------------------------------------------------
+# Size of a single panel. `size` wins over `preset`.
+#   single 6.0x4.5 | wide 8.0x3.5 | double 11.0x4.5 | triple 16.0x4.0
+# -----------------------------------------------------------------------------
+figure:
+  preset: single
+  size: null
+
+
+# -----------------------------------------------------------------------------
+# Output. Same convention as the other paper figures: the figure and the data
+# behind it land together, and nothing is ever overwritten.
+# -----------------------------------------------------------------------------
+output:
+  directory: ../../new_results/paper_plot_images/reconstruction
+  name: diagnostics
+  timestamp: false
+  formats: [pdf, png]
+  dpi: 500
+  transparent: false
+  save_data: true          # .npz of every series + .yaml describing them
+  save_csv: false

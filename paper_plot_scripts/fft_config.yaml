@@ -1,0 +1,170 @@
+# =============================================================================
+# Paper figure: FFT of the swept signal
+# =============================================================================
+#
+#   python plot_fft.py
+#
+# Every key below is optional -- anything omitted falls back to the defaults
+# in plot_fft.py. Relative paths resolve against this script's directory.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# What to plot. One entry draws one spectrum; several are compared in one panel.
+#
+# A source is either a run directory from refactored_code/01_run_sweep.py
+# (pc_list.npy + tw_l.npy + metadata.yaml), or a bare .npy holding the signal.
+# For a bare .npy give either `tw_file:` or `max_wait_time:` so the frequency
+# axis can be built.
+#
+# Per-source keys (all optional):
+#   label         legend text (default: the directory or file name)
+#   color         overrides the palette for this curve
+#   linestyle     '-', '--', ':', '-.'
+#   linewidth
+#   tw_file       explicit wait-time grid .npy
+#   max_wait_time used to rebuild the grid when none is stored
+# -----------------------------------------------------------------------------
+sources:
+  - path: ../../new_results/sweeps/3_qubits_good_1ns
+    label: T = 1 ns
+
+  # Add more to compare runs in the same panel:
+  - path: ../../new_results/sweeps/3_qubits_good_1-5ns
+    label: T = 1.5 ns
+
+
+
+
+# -----------------------------------------------------------------------------
+# The transform. These mirror src/fourier.py, so the figure shows the same
+# spectrum the peak detection ran on. Change them only to match a different
+# analysis.
+# -----------------------------------------------------------------------------
+fft:
+  window: hann          # hann | blackmanharris | boxcar | ...
+  zero_pad_factor: 32
+  # Rescale the magnitude so runs of different length are comparable:
+  #   null | max (peak -> 1) | area (unit area) | coherent (signal amplitude)
+  normalise: null
+
+
+# -----------------------------------------------------------------------------
+# The dashed vertical lines marking the peaks. Set show: false to omit them.
+#
+# source:
+#   auto             use the peaks script 2 detected, else re-detect  (default)
+#   detected         use the stored detected peaks; error if absent
+#   true_differences the exact transition frequencies from the Hamiltonian
+#   detect           always re-detect from the spectrum shown here
+#
+# Prefer the stored peaks when they exist: script 2 refines each one to
+# sub-bin precision, which plain re-detection here does not. Re-detected
+# positions agree to well under a bin (~1e-4), so they look identical, but
+# the stored ones are the exact values the analysis reported.
+# -----------------------------------------------------------------------------
+peaks:
+  show: false
+  source: auto
+
+  # Only used when peaks are re-detected here. With no n_peaks cap and no
+  # f_min, re-detection keeps every prominent maximum, so it can mark more
+  # peaks than the analysis did -- set these to match a particular run.
+  n_peaks: null              # null -> no cap
+  detect_prominence: 0.001   # fraction of the tallest peak
+  f_min: null                # ignore peaks below this frequency
+
+  color: null                # null -> the palette's reference colour (red)
+  linestyle: "--"
+  linewidth: 0.8
+  alpha: 0.75
+  per_series_color: false    # true -> markers match their curve's colour
+  label: null                # e.g. "detected peaks" to put them in the legend
+
+  annotate: false            # write each frequency above its marker
+  annotate_precision: 3
+  annotate_fontsize: 8
+
+
+# -----------------------------------------------------------------------------
+# Axes
+# -----------------------------------------------------------------------------
+axes:
+  xlabel: $\omega/2\pi$ (GHz)
+  ylabel: $|Y(\omega)|$
+  title: null                # null -> no title (prefer a caption in the paper)
+
+  xlim: [0,1]                 # [min, max]; null -> framed around the peaks
+  ylim: null
+  x_max_from_peaks: true     # frame the x axis on the marked peaks
+  x_max_margin: 1.2          # ... times the highest peak
+
+  yscale: linear             # linear | log
+  log_decades: 4.0           # how far below the tallest peak a log axis shows
+  grid: false
+
+
+# -----------------------------------------------------------------------------
+# Legend
+# -----------------------------------------------------------------------------
+legend:
+  show: true
+  loc: best                  # best | upper right | lower left | ...
+  frameon: false
+  fontsize: null             # null -> the paper style's legend size
+  ncol: 1
+  title: null
+
+
+# -----------------------------------------------------------------------------
+# Appearance. Defaults come from src/plotting/style.py.
+# -----------------------------------------------------------------------------
+style:
+  palette: modern             # sober (black/red/grey) | modern
+  colors: null               # e.g. ["black", "#2f6f9f"] -- one per source
+  linewidth: null            # null -> the paper style's width
+  linestyles: null           # e.g. ["-", "--", ":"] cycled over the sources
+  alpha: 1.0
+
+  font_sizes:                # null/omitted -> the paper style's sizes
+    label: null
+    tick: null
+    legend: null
+    title: null
+
+  rcparams: {}               # any extra matplotlib rcParams
+
+
+# -----------------------------------------------------------------------------
+# How several sources share the figure.
+#   overlay  all curves in one panel            (default)
+#   offset   one panel, each curve shifted up by `offset`
+#   stacked  one panel per curve, sharing the x axis
+# -----------------------------------------------------------------------------
+layout:
+  mode: overlay
+  offset: 0.0
+  sharex: true
+
+
+# -----------------------------------------------------------------------------
+# Figure geometry. `size` wins over `preset`.
+#   single 6.0x4.5 | wide 8.0x3.5 | double 11.0x4.5 | triple 16.0x4.0
+# -----------------------------------------------------------------------------
+figure:
+  preset: single
+  size: null                 # [width, height] in inches
+
+
+# -----------------------------------------------------------------------------
+# Output. The figure and the data behind it both land in `directory`.
+# Existing files are never overwritten -- a numeric suffix is added instead.
+# -----------------------------------------------------------------------------
+output:
+  directory: ../../new_results/paper_plot_images/fft
+  name: fft_spectrum_comparison
+  timestamp: false           # true -> append _<timestamp> to the name
+  formats: [pdf, png]        # pdf for the paper, png to glance at
+  dpi: 500
+  transparent: false
+  save_data: true            # .npz of every curve + .yaml describing them
+  save_csv: false            # also one plain CSV per curve

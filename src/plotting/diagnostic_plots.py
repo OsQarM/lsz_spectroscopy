@@ -181,7 +181,7 @@ def plot_instantaneous_spectrum(t_list, egvals, ax=None, figsize=None,
     for k in range(egvals.shape[1]):
         ax.plot(t_list, egvals[:, k], color=style.DATA, lw=style.LINEWIDTH)
 
-    style.style_axis(ax, xlabel=r"$t$", ylabel=r"$E$")
+    style.style_axis(ax, xlabel=r"$B_t$", ylabel=r"$E$(GHz)")
     if created:
         fig.tight_layout()
     if show:

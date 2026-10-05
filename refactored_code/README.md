@@ -1,7 +1,7 @@
 # LZS spectroscopy pipeline
 
-The work that used to live in `notebooks/LSZ_main.ipynb`, split into three
-scripts driven by a single `config.yaml`. The physics is unchanged: everything
+The work that used to live in `notebooks/LSZ_main.ipynb`, split into separate
+scripts driven by YAML config files. The physics is unchanged: everything
 still comes from the repository's `src/` package, which these scripts import
 but never modify.
 
@@ -9,7 +9,9 @@ but never modify.
 01_run_sweep.py        pre-simulation diagnostics + the wait-time sweep
 02_run_diagnostics.py  full diagnostics on a stored pc_list
 03_run_asymmetry.py    amplitude vs. ramp-asymmetry sweep
-config.yaml            every parameter for all three scripts
+04_search_hamiltonians.py  random search for a well-separated spectrum
+config.yaml            parameters for scripts 1-3
+search_config.yaml     parameters for script 4
 lzs_pipeline/          shared infrastructure (config, I/O, pre-simulation)
 ```
 
@@ -27,6 +29,9 @@ python 02_run_diagnostics.py --input-dir results/sweeps/sweep_<timestamp>
 
 # 4. The separate asymmetry study.
 python 03_run_asymmetry.py
+
+# Pick a Hamiltonian with well-separated peaks in the first place.
+python 04_search_hamiltonians.py
 ```
 
 Use the `spectroscopy` pyenv interpreter:
@@ -109,6 +114,48 @@ results/asymmetry/asymmetry_<timestamp>/
     metadata.yaml         every parameter used
     output.txt            a transcript
     plots/                pre-simulation + asymmetry_vs_a + amplitude_vs_area
+```
+
+## Script 4 — `04_search_hamiltonians.py`
+
+Searches for a Hamiltonian whose spectrum is easy to resolve. It samples
+random parameters inside configured bounds, diagonalises each midpoint
+(target) Hamiltonian, forms all `2^n(2^n-1)/2` transition frequencies, and
+records the smallest gap between any two of them. Only the best candidates are
+kept — it scans millions of Hamiltonians without storing them.
+
+That gap is exactly the **"Closest true freq. spacing"** of the sampling check
+in scripts 1 and 3 (verified to match `check_sampling_adequacy` exactly).
+Resolving the two closest peaks needs `max_wait_time >= 1/gap`, so a larger gap
+buys a shorter, cheaper sweep. For each candidate the script prints the implied
+minimum `max_wait_time` and the `n_sims` that keeps the fastest transition
+below Nyquist, plus a `hamiltonian:` block ready to paste into `config.yaml`.
+
+Configure it in `search_config.yaml`: `n_qubits`, `n_samples`, and per term
+group (`local_z`, `local_x`, `two_body`) either
+
+```yaml
+sample: true
+bounds: [-4.0, 4.0]
+discrete: null      # or e.g. 0.25 to snap draws to a grid
+```
+
+or held fixed with `sample: false` and a scalar or per-entry `value:`.
+`max_frequency` optionally rejects spectra whose fastest transition would
+demand too fine a wait-time grid.
+
+When `local_x` is fixed at zero the target Hamiltonian is diagonal, so
+eigenvalues come from a matrix product and the search runs at ~1.9M
+Hamiltonians/s. A nonzero `local_x` switches automatically to batched
+`eigvalsh` (~200k/s). Both paths were checked against `LSZ_experiment` to
+machine precision.
+
+```
+results/hamiltonian_search/search_<timestamp>/
+    best_hamiltonian.yaml   the winner and its implied sweep settings
+    top_candidates.npz      the top-k parameters and their gaps
+    metadata.yaml           the search settings
+    output.txt              a transcript
 ```
 
 ## Nothing is ever overwritten
